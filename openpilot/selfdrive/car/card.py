@@ -324,7 +324,7 @@ class Car:
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  config_realtime_process([5,6], Priority.CTRL_HIGH)
   car = Car()
   car.card_thread()
 

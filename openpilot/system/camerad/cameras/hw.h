@@ -13,7 +13,7 @@ typedef enum {
   ISP_BPS_PROCESSED,  // fully processed image through the BPS
 } SpectraOutputType;
 
-// For the comma 3X three camera platform
+// For the Xiaomi Mi 8 (dipper) / comma 3X platform
 
 struct CameraConfig {
   int camera_num;
@@ -25,48 +25,47 @@ struct CameraConfig {
   uint32_t phy;
   bool vignetting_correction;
   SpectraOutputType output_type;
-  bool staggered_sof;  // SOF is staggered (half-period offset) from other cameras
 };
 
-// NOTE: to be able to disable road and wide road, we still have to configure the sensor over i2c
-// If you don't do this, the strobe GPIO is an output (even in reset it seems!)
-const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
-  .camera_num = 0,
-  .stream_type = VISION_STREAM_WIDE_ROAD,
-  .focal_len = 1.71,
-  .publish_name = "wideRoadCameraState",
-  .init_camera_state = &cereal::Event::Builder::initWideRoadCameraState,
-  .enabled = !getenv("DISABLE_WIDE_ROAD"),
-  .phy = CAM_ISP_IFE_IN_RES_PHY_0,
-  .vignetting_correction = false,
-  .output_type = ISP_IFE_PROCESSED,
-  .staggered_sof = false,
-};
-
+// Xiaomi Mi 8: camera_num 0 = IMX363 rear main (CSIPHY 0)
+// Use as ROAD camera for driving
 const CameraConfig ROAD_CAMERA_CONFIG = {
-  .camera_num = 1,
+  .camera_num = 0,
   .stream_type = VISION_STREAM_ROAD,
-  .focal_len = 8.0,
+  .focal_len = 4.44,
   .publish_name = "roadCameraState",
   .init_camera_state = &cereal::Event::Builder::initRoadCameraState,
   .enabled = !getenv("DISABLE_ROAD"),
-  .phy = CAM_ISP_IFE_IN_RES_PHY_1,
+  .phy = CAM_ISP_IFE_IN_RES_PHY_0,
   .vignetting_correction = true,
-  .output_type = ISP_IFE_PROCESSED,
-  .staggered_sof = false,
+  .output_type = ISP_IFE_PROCESSED,  // Use hardware ISP for demosaic+color+gamma
 };
 
+// Also publish as WIDE_ROAD using the same camera for model compatibility
+const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
+  .camera_num = 0,
+  .stream_type = VISION_STREAM_WIDE_ROAD,
+  .focal_len = 4.44,
+  .publish_name = "wideRoadCameraState",
+  .init_camera_state = &cereal::Event::Builder::initWideRoadCameraState,
+  .enabled = false,  // disabled - single rear camera only
+  .phy = CAM_ISP_IFE_IN_RES_PHY_0,
+  .vignetting_correction = false,
+  .output_type = ISP_IFE_PROCESSED,
+};
+
+// Xiaomi Mi 8: camera_num 2 = IMX576 front camera (CSIPHY 2)
+// Use as DRIVER camera for driver monitoring
 const CameraConfig DRIVER_CAMERA_CONFIG = {
   .camera_num = 2,
   .stream_type = VISION_STREAM_DRIVER,
-  .focal_len = 1.71,
+  .focal_len = 3.67,
   .publish_name = "driverCameraState",
   .init_camera_state = &cereal::Event::Builder::initDriverCameraState,
-  .enabled = !getenv("DISABLE_DRIVER"),
+  .enabled = false,  // disabled for now - IMX576 driver not yet implemented
   .phy = CAM_ISP_IFE_IN_RES_PHY_2,
   .vignetting_correction = false,
   .output_type = ISP_BPS_PROCESSED,
-  .staggered_sof = true,
 };
 
-const CameraConfig ALL_CAMERA_CONFIGS[] = {WIDE_ROAD_CAMERA_CONFIG, ROAD_CAMERA_CONFIG, DRIVER_CAMERA_CONFIG};
+const CameraConfig ALL_CAMERA_CONFIGS[] = {ROAD_CAMERA_CONFIG, WIDE_ROAD_CAMERA_CONFIG, DRIVER_CAMERA_CONFIG};

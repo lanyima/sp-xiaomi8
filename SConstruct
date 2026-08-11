@@ -195,6 +195,10 @@ _extra_cc = shlex.split(GetOption('ccflags') or '')
 if _extra_cc:
   env.Append(CCFLAGS=_extra_cc)
 
+# xiaomi8: clang-18 on AGNOS lacks arm_neon.h; disable Eigen vectorisation globally
+if arch == "larch64":
+  env.Append(CPPDEFINES=["EIGEN_DONT_VECTORIZE"])
+
 # no --as-needed on mac linker
 if arch != "Darwin":
   env.Append(LINKFLAGS=["-Wl,--as-needed", "-Wl,--no-undefined"])
@@ -252,9 +256,10 @@ def prune_cache_dir(target=None, source=None, env=None):
 
 # Build common module
 SConscript(['openpilot/common/SConscript'])
-Import('_common')
+Import('_common', '_gpucommon')
 common = [_common, 'json11', 'zmq']
-Export('common')
+gpucommon = [_gpucommon]
+Export('common', 'gpucommon')
 
 # Build messaging (cereal + msgq + socketmaster + their dependencies)
 # Enable swaglog include in submodules
@@ -280,7 +285,8 @@ SConscript([
   'openpilot/system/loggerd/SConscript',
 ])
 
-if arch == "larch64":
+# xiaomi8: build camerad on larch64 (AGNOS) AND aarch64 (cross-builds) — HAL path needs no special hw
+if arch == "larch64" or arch == "aarch64":
   SConscript(['openpilot/system/camerad/SConscript'])
 
 # Build selfdrive

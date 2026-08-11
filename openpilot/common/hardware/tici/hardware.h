@@ -12,9 +12,13 @@
 class HardwareTici : public HardwareNone {
 public:
   static std::string get_name() {
-    static const std::string name = []() {
-      std::string model = util::read_file("/sys/firmware/devicetree/base/model");
-      return util::strip(model.substr(std::string("comma ").size()));
+    static const std::string name = []() -> std::string {
+      std::string model = util::strip(util::read_file("/sys/firmware/devicetree/base/model"));
+      // xiaomi8 (dipper) or other non-comma devices: treat as tici
+      if (model.find("comma ") == 0) {
+        return util::strip(model.substr(std::string("comma ").size()));
+      }
+      return "tici";
     }();
     return name;
   }
@@ -24,8 +28,11 @@ public:
       {"tizi", cereal::InitData::DeviceType::TIZI},
       {"mici", cereal::InitData::DeviceType::MICI}
     };
-    static const auto it = device_map.find(get_name());
-    assert(it != device_map.end());
+    auto it = device_map.find(get_name());
+    // xiaomi8: fall back to TICI rather than abort on non-comma devices
+    if (it == device_map.end()) {
+      return cereal::InitData::DeviceType::TICI;
+    }
     return it->second;
   }
 

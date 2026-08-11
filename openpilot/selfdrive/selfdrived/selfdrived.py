@@ -88,7 +88,13 @@ class SelfdriveD(CruiseHelper):
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
     self.sensor_packets = ["accelerometer", "gyroscope"]
-    self.camera_packets = ["roadCameraState", "driverCameraState", "wideRoadCameraState"]
+    # xiaomi8: HAL3 backend publishes only roadCameraState; NO_DM=1, NO_WIDE=1
+    # by default. Listing absent cams here trips cameraMalfunction every cycle.
+    self.camera_packets = ["roadCameraState"]
+    if os.getenv("NO_WIDE") is None:
+      self.camera_packets.append("wideRoadCameraState")
+    if os.getenv("NO_DM") is None:
+      self.camera_packets.append("driverCameraState")
 
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
@@ -650,7 +656,7 @@ class SelfdriveD(CruiseHelper):
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  config_realtime_process(5, Priority.CTRL_HIGH)
   s = SelfdriveD()
   s.run()
 

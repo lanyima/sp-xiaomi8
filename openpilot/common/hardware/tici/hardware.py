@@ -36,7 +36,11 @@ def get_device_type():
   # lru_cache and cache can cause memory leaks when used in classes
   with open("/sys/firmware/devicetree/base/model") as f:
     model = f.read().strip('\x00')
-  return model.split('comma ')[-1]
+  device_type = model.split('comma ')[-1]
+  # Xiaomi8: non-comma devices report as tici
+  if 'comma' not in model.lower():
+    return 'tici'
+  return device_type
 
 def wpa_supplicant_cmd(cmd: str, timeout: float = 0.2) -> dict[str, str]:
   with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
@@ -63,7 +67,13 @@ class Tici(HardwareBase):
   def amplifier(self):
     if self.get_device_type() == "mici":
       return None
-    return Amplifier()
+    try:
+      from smbus2 import SMBus
+      with SMBus(0) as bus:
+        bus.read_byte_data(0x10, 0xFF, force=True)
+      return Amplifier()
+    except Exception:
+      return None
 
   def get_modem_state(self) -> dict:
     try:
@@ -89,26 +99,6 @@ class Tici(HardwareBase):
 
   def get_serial(self):
     return self.get_cmdline()['androidboot.serialno']
-
-  def get_voltage(self):
-    with open("/sys/class/hwmon/hwmon1/in1_input") as f:
-      return int(f.read())
-
-  def get_current(self):
-    with open("/sys/class/hwmon/hwmon1/curr1_input") as f:
-      return int(f.read())
-
-  def set_ir_power(self, percent: int):
-    if self.get_device_type() == "tizi":
-      return
-
-    value = int((percent / 100) * 300)
-    with open("/sys/class/leds/led:switch_2/brightness", "w") as f:
-      f.write("0\n")
-    with open("/sys/class/leds/led:torch_2/brightness", "w") as f:
-      f.write(f"{value}\n")
-    with open("/sys/class/leds/led:switch_2/brightness", "w") as f:
-      f.write(f"{value}\n")
 
   def get_network_type(self):
     try:
@@ -290,37 +280,53 @@ class Tici(HardwareBase):
       return 0
 
   def set_power_save(self, powersave_enabled):
-    # amplifier, 100mW at idle
-    if self.amplifier is not None:
-      self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
+    try:
+      # amplifier, 100mW at idle
+      if self.amplifier is not None:
+        self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
+        if not powersave_enabled:
+          self.amplifier.initialize_configuration()
+
+      # *** CPU config ***
       if not powersave_enabled:
-        self.amplifier.initialize_configuration()
+        # Performance mode: online big cluster FIRST, then set governor + max freq
+        for i in range(4, 8):
+          sudo_write('1', f'/sys/devices/system/cpu/cpu{i}/online')
+        import time; time.sleep(0.1)
+        for n in ('0', '4'):
+          sudo_write('performance', f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor')
+        # Unlock max CPU frequencies (SDM845: little=1766400, big=2649600)
+        sudo_write('1766400', '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq')
+        sudo_write('2649600', '/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq')
+        # Xiaomi8: reset thermal cooling min_state to prevent gold cluster being locked at 1.5GHz
+        # The thermal framework initializes cpufreq cooling devices at max throttle (state=24)
+        # which caps gold cluster to 1536MHz. Reset min_state + cur_state to allow full 2.65GHz.
+        for cd in range(7, 11):  # cooling_device7-10 = cpu4-7 (gold cluster)
+          sudo_write("0", f"/sys/devices/virtual/thermal/cooling_device{cd}/min_state")
+          sudo_write("0", f"/sys/devices/virtual/thermal/cooling_device{cd}/cur_state")
+        # Boost GPU: set min freq to 520MHz (max=710MHz)
+        sudo_write('710000000', '/sys/class/kgsl/kgsl-3d0/devfreq/min_freq')
+      else:
+        # Power save: set governor first, then offline big cluster
+        sudo_write('ondemand', '/sys/devices/system/cpu/cpufreq/policy0/scaling_governor')
+        # Lower CPU max freq in power save
+        sudo_write('1516800', '/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq')
+        for i in range(4, 8):
+          sudo_write('0', f'/sys/devices/system/cpu/cpu{i}/online')
+        # Lower GPU min freq in power save
+        sudo_write('257000000', '/sys/class/kgsl/kgsl-3d0/devfreq/min_freq')
 
-    # *** CPU config ***
+      # *** IRQ config ***
 
-    # offline big cluster
-    for i in range(4, 8):
-      val = '0' if powersave_enabled else '1'
-      sudo_write(val, f'/sys/devices/system/cpu/cpu{i}/online')
+      # GPU, modeld core
+      affine_irq(7, 'kgsl-3d0')
 
-    for n in ('0', '4'):
-      if powersave_enabled and n == '4':
-        continue
-      gov = 'ondemand' if powersave_enabled else 'performance'
-      sudo_write(gov, f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor')
-      if not powersave_enabled:
-        # cap max core freq to 1689 Mhz
-        sudo_write('1689600', f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_max_freq')
-
-    # *** IRQ config ***
-
-    # GPU, modeld core
-    affine_irq(7, "kgsl-3d0")
-
-    # camerad core
-    camera_irqs = ("a5", "cci", "cpas_camnoc", "cpas-cdm", "csid", "ife", "csid-lite", "ife-lite")
-    for n in camera_irqs:
-      affine_irq(6, n)
+      # camerad core
+      camera_irqs = ('a5', 'cci', 'cpas_camnoc', 'cpas-cdm', 'csid', 'ife', 'csid-lite', 'ife-lite')
+      for n in camera_irqs:
+        affine_irq(6, n)
+    except Exception as e:
+      print(f'set_power_save error (ignored): {e}')
 
   def get_gpu_usage_percent(self):
     try:
@@ -331,6 +337,13 @@ class Tici(HardwareBase):
       return 0
 
   def initialize_hardware(self):
+    # Xiaomi8: Force USB-C to host mode for external panda
+    # DWC3 defaults to sink mode; panda needs VBUS (5V) from phone
+    try:
+      with open("/sys/devices/platform/soc/a600000.ssusb/mode", "w") as f:
+        f.write("host")
+    except Exception:
+      pass
     if self.amplifier is not None:
       self.amplifier.initialize_configuration()
 
@@ -347,26 +360,26 @@ class Tici(HardwareBase):
     sudo_write("f", "/proc/irq/default_smp_affinity")
 
     # move these off the default core
+    affine_irq(1, "msm_drm")   # display
     affine_irq(1, "msm_vidc")  # encoders
     affine_irq(1, "i2c_geni")  # sensors
 
     # *** GPU config ***
     # https://github.com/commaai/agnos-kernel-sdm845/blob/master/arch/arm64/boot/dts/qcom/sdm845-gpu.dtsi#L216
-    affine_irq(5, "fts_ts")    # touch
-    affine_irq(5, "msm_drm")   # display
     sudo_write("1", "/sys/class/kgsl/kgsl-3d0/min_pwrlevel")
     sudo_write("1", "/sys/class/kgsl/kgsl-3d0/max_pwrlevel")
     sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_bus_on")
     sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_clk_on")
     sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_rail_on")
     sudo_write("1000", "/sys/class/kgsl/kgsl-3d0/idle_timer")
-    sudo_write("performance", "/sys/class/kgsl/kgsl-3d0/devfreq/governor")
+    sudo_write("msm-adreno-tz", "/sys/class/kgsl/kgsl-3d0/devfreq/governor")
     sudo_write("710", "/sys/class/kgsl/kgsl-3d0/max_clock_mhz")
 
     # setup governors
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,cpubw/governor")
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,memlat-cpu0/governor")
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,memlat-cpu4/governor")
+    # Xiaomi8: disabled - kernel deadlock in governor_store
+    # sudo_write("msm-adreno-tz", "/sys/class/devfreq/soc:qcom,cpubw/governor")
+    # sudo_write("msm-adreno-tz", "/sys/class/devfreq/soc:qcom,memlat-cpu0/governor")
+    # sudo_write("msm-adreno-tz", "/sys/class/devfreq/soc:qcom,memlat-cpu4/governor")
 
     # *** VIDC (encoder) config ***
     sudo_write("N", "/sys/kernel/debug/msm_vidc/clock_scaling")
@@ -385,7 +398,12 @@ class Tici(HardwareBase):
     ms = self.get_modem_state()
     return ms.get('tx_bytes', -1), ms.get('rx_bytes', -1)
 
+  def has_internal_panda(self):
+    return False  # xiaomi8: external USB panda, no internal STM32 panda
+
   def reset_internal_panda(self):
+    if not self.has_internal_panda():
+      return
     gpio_init(GPIO.STM_RST_N, True)
     gpio_init(GPIO.STM_BOOT0, True)
 
@@ -395,6 +413,8 @@ class Tici(HardwareBase):
     gpio_set(GPIO.STM_RST_N, False)
 
   def recover_internal_panda(self):
+    if not self.has_internal_panda():
+      return
     gpio_init(GPIO.STM_RST_N, True)
     gpio_init(GPIO.STM_BOOT0, True)
 

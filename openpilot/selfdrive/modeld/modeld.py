@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 import os
 os.environ['GMMU'] = '0' # for usbgpu fast loading, noop for qcom
+# xiaomi8: force QCOM GPU backend on TICI (Adreno 630); must be set before tinygrad import.
+# Experimental — validate on device; flip to CPU if the QCOM backend is unstable with the compiled model.
+from openpilot.system.hardware import TICI
+if "DEV" not in os.environ:
+  os.environ["DEV"] = "QCOM" if TICI else "CPU"
 from tinygrad.tensor import Tensor
 import time
 import numpy as np

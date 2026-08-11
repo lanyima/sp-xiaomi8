@@ -114,26 +114,28 @@ def not_(*fns):
   return lambda *args: operator.not_(*(fn(*args) for fn in fns))
 
 procs = [
-  DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid"),
+  DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid", enabled=False),  # xiaomi8: thermal save
 
-  NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad),
-  NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(and_(livestream, not_(iscar)), notcar)),
-  PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
+  NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging, enabled=False),  # xiaomi8: VIDC crash / CPU save
+  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad, enabled=False),  # xiaomi8: VIDC crash / CPU save
+  NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(and_(livestream, not_(iscar)), notcar), enabled=False),  # xiaomi8: VIDC crash / CPU save
+  PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run, enabled=False),  # xiaomi8: CPU save
 
-  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream), enabled=not WEBCAM),
+  # xiaomi8: HAL3 camera pipeline (replaces qcom2/spectra). hal3_direct -> SHM -> camerad_hal_v2
+  PythonProcess("android_hal_manager", "openpilot.system.camerad.android_hal_manager", always_run),
+  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad_hal_v2"], always_run, enabled=not WEBCAM),
   PythonProcess("webcamerad", "openpilot.system.camerad.webcam.camerad", driverview, enabled=WEBCAM),
-  PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
-  PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() != "Darwin"),
-  PythonProcess("micd", "openpilot.system.micd", iscar),
+  PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=False),  # xiaomi8: thermal save
+  PythonProcess("journald", "openpilot.system.journald", only_onroad, enabled=False),  # xiaomi8: CPU save
+  PythonProcess("micd", "openpilot.system.micd", iscar, enabled=False),  # xiaomi8: thermal save
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
-  PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
-  PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
+  PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),  # xiaomi8: re-enabled
+  PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=False),  # xiaomi8: no front camera
 
-  PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
+  PythonProcess("sensord", "openpilot.system.sensord.sensord", always_run),  # xiaomi8: QMI SLPI driver, run always
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),
-  PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
+  PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", only_onroad),  # xiaomi8: only onroad to save CPU
   PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
   NativeProcess("_pandad", "openpilot/selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "openpilot.selfdrive.locationd.calibrationd", only_onroad),
@@ -142,10 +144,10 @@ procs = [
   PythonProcess("joystickd", "openpilot.tools.joystick.joystickd", or_(joystick, notcar)),
   PythonProcess("selfdrived", "openpilot.selfdrive.selfdrived.selfdrived", only_onroad),
   PythonProcess("card", "openpilot.selfdrive.car.card", only_onroad),
-  PythonProcess("deleter", "openpilot.system.loggerd.deleter", always_run),
-  PythonProcess("dmonitoringd", "openpilot.selfdrive.monitoring.dmonitoringd", driverview, enabled=(WEBCAM or not PC)),
+  PythonProcess("deleter", "openpilot.system.loggerd.deleter", always_run, enabled=False),  # xiaomi8: thermal save
+  PythonProcess("dmonitoringd", "openpilot.selfdrive.monitoring.dmonitoringd", driverview, enabled=False),  # xiaomi8: no front camera
   PythonProcess("qcomgpsd", "openpilot.system.qcomgpsd.qcomgpsd", qcomgps, enabled=TICI),
-  PythonProcess("pandad", "openpilot.selfdrive.pandad.pandad", always_run),
+  PythonProcess("pandad", "openpilot.selfdrive.pandad.pandad", always_run, enabled=False),  # fake_pandad takeover
   PythonProcess("paramsd", "openpilot.selfdrive.locationd.paramsd", only_onroad),
   PythonProcess("lagd", "openpilot.selfdrive.locationd.lagd", only_onroad),
   PythonProcess("ubloxd", "openpilot.system.ubloxd.ubloxd", ublox, enabled=TICI),
@@ -155,12 +157,12 @@ procs = [
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
-  PythonProcess("modem", "openpilot.common.hardware.tici.modem", always_run, enabled=TICI),
-  PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),
-  PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=not PC),
-  PythonProcess("uploader", "openpilot.system.loggerd.uploader", uploader_ready),
-  PythonProcess("statsd", "openpilot.sunnypilot.system.statsd", always_run),
-  PythonProcess("feedbackd", "openpilot.selfdrive.ui.feedback.feedbackd", only_onroad),
+  PythonProcess("modem", "openpilot.common.hardware.tici.modem", always_run, enabled=False),  # xiaomi8: no modem
+  PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=False),  # xiaomi8: thermal save
+  PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=False),  # xiaomi8: would brick (downloads c3 firmware)
+  PythonProcess("uploader", "openpilot.system.loggerd.uploader", uploader_ready, enabled=False),  # xiaomi8: thermal save
+  PythonProcess("statsd", "openpilot.sunnypilot.system.statsd", always_run, enabled=False),  # xiaomi8: thermal save
+  PythonProcess("feedbackd", "openpilot.selfdrive.ui.feedback.feedbackd", only_onroad, enabled=False),  # xiaomi8: CPU save
 
   # debug procs
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
@@ -168,16 +170,16 @@ procs = [
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 
   # sunnylink <3
-  DaemonProcess("manage_sunnylinkd", "openpilot.sunnypilot.sunnylink.athena.manage_sunnylinkd", "SunnylinkdPid"),
-  PythonProcess("sunnylink_registration_manager", "openpilot.sunnypilot.sunnylink.registration_manager", sunnylink_need_register_shim),
-  PythonProcess("statsd_sp", "openpilot.sunnypilot.sunnylink.statsd", and_(always_run, sunnylink_ready_shim)),
+  DaemonProcess("manage_sunnylinkd", "openpilot.sunnypilot.sunnylink.athena.manage_sunnylinkd", "SunnylinkdPid", enabled=False),  # xiaomi8: sunnylink cloud unused (busy-loop)
+  PythonProcess("sunnylink_registration_manager", "openpilot.sunnypilot.sunnylink.registration_manager", sunnylink_need_register_shim, enabled=False),  # xiaomi8: sunnylink cloud unused
+  PythonProcess("statsd_sp", "openpilot.sunnypilot.sunnylink.statsd", and_(always_run, sunnylink_ready_shim), enabled=False),  # xiaomi8: sunnylink cloud unused
 ]
 
 # sunnypilot
 procs += [
   # Models
-  PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad),
-  NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model)),
+  PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad, enabled=False),  # xiaomi8: GPU isolation test
+  NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model), enabled=False),  # xiaomi8: GPU isolation test
 
   # Backup
   PythonProcess("backup_manager", "openpilot.sunnypilot.sunnylink.backups.manager", and_(only_offroad, sunnylink_ready_shim)),
