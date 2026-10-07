@@ -18,6 +18,7 @@ public:
   LoggerState(const std::string& log_root = Path::log_root());
   ~LoggerState();
   bool next();
+  bool close();
   void write(uint8_t* data, size_t size, bool in_qlog);
   inline int segment() const { return part; }
   inline const std::string& segmentPath() const { return segment_path; }

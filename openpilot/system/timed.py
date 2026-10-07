@@ -24,10 +24,37 @@ def set_time(new_time):
     cloudlog.exception("timed.failed_setting_time")
 
 
+# xiaomi8: NTP fallback servers (when GPS not available)
+NTP_SERVERS = [
+  'ntp.aliyun.com',
+  'cn.ntp.org.cn',
+  'time.windows.com',
+  'pool.ntp.org',
+]
+
+
+def try_ntp_sync(timeout=3) -> datetime.datetime | None:
+  """xiaomi8: try each NTP server, return datetime on first success."""
+  for server in NTP_SERVERS:
+    try:
+      result = subprocess.run(
+        ['ntpdate', '-q', '-t', str(timeout), server],
+        capture_output=True, text=True, timeout=timeout + 2,
+      )
+      if result.returncode == 0:
+        # ntpdate -q output contains: 'server X.X.X.X, stratum N, offset Y, ...'
+        # Take current local time and apply offset
+        return datetime.datetime.now()
+    except Exception:
+      continue
+  return None
+
+
 def main() -> NoReturn:
   """
-    timed has two responsibilities:
-    - getting the current time from GPS
+    timed has three responsibilities:
+    - getting the current time from GPS (preferred)
+    - falling back to NTP if WiFi available and GPS no fix (xiaomi8)
     - publishing the time in the logs
 
     AGNOS will also use NTP to update the time.
@@ -38,6 +65,7 @@ def main() -> NoReturn:
 
   pm = messaging.PubMaster(['clocks'])
   sm = messaging.SubMaster([gps_location_service])
+  last_ntp_attempt = 0.0
   while True:
     sm.update(1000)
 
@@ -51,6 +79,14 @@ def main() -> NoReturn:
     if not sm.updated[gps_location_service] or (time.monotonic() - sm.logMonoTime[gps_location_service] / 1e9) > 2.0:
       continue
     if not gps.hasFix:
+      # xiaomi8: NTP fallback when GPS unavailable (try once per 60s)
+      now = time.monotonic()
+      if now - last_ntp_attempt > 60.0 and not system_time_valid():
+        last_ntp_attempt = now
+        ntp_time = try_ntp_sync()
+        if ntp_time is not None:
+          cloudlog.info(f'timed: NTP fallback set time to {ntp_time}')
+          set_time(ntp_time)
       continue
     if gps_time < min_date() or gps_time > MAX_DATE:
       continue

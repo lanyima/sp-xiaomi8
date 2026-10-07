@@ -260,7 +260,18 @@ void loggerd_thread() {
 
   std::map<std::string, EncoderInfo> encoder_infos_dict;
   std::vector<RemoteEncoder*> encoders_with_audio;
+  // Phone ports can deliberately expose only the road stream.  Do not count
+  // disabled wide/driver encoders as segment-rotation participants: loggerd
+  // would otherwise wait forever for packets that camerad will never publish,
+  // while encoderd advances its own segment counter and video stops landing.
+  const bool no_wide = getenv("NO_WIDE") != nullptr;
+  const bool no_driver = getenv("NO_DM") != nullptr;
   for (const auto &cam : cameras_logged) {
+    if ((cam.stream_type == VISION_STREAM_WIDE_ROAD && no_wide) ||
+        (cam.stream_type == VISION_STREAM_DRIVER && no_driver)) {
+      LOGW("not logging disabled camera stream %d", cam.stream_type);
+      continue;
+    }
     for (const auto &encoder_info : cam.encoder_infos) {
       encoder_infos_dict[encoder_info.publish_name] = encoder_info;
     }

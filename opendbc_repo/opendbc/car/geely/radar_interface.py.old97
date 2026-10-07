@@ -1,0 +1,140 @@
+"""Geely ARS410雷达接口"""
+import math
+from opendbc.car import structs
+from opendbc.car.interfaces import RadarInterfaceBase
+
+# ARS410雷达地址范围 (Bus 1: 0x20-0x80, 97个目标槽位)
+RADAR_START_ADDR = 0x20
+RADAR_END_ADDR = 0x80
+
+# 信号解析参数 (2026-01-07 验证修正)
+# Byte 0-1: DISTANCE     - LE uint16, scale=0.0027, range 0.2-177m
+# Byte 2:   VALID_LEVEL  - uint8, 质量指标 (0-255, 越高越可靠)
+# Byte 4:   REL_VELOCITY - uint8, offset=128, scale=0.5, range ±64m/s (±230km/h)
+# Byte 6:   SIGNAL_QUALITY - uint8 (0-255, 信号强度)
+# Byte 7:   AZIMUTH      - uint8, offset=128, scale=0.25, range ±32°
+DISTANCE_SCALE = 0.0027
+VELOCITY_SCALE = 0.5
+VELOCITY_OFFSET = 128
+AZIMUTH_SCALE = 0.25
+AZIMUTH_OFFSET = 128
+
+# 噪点过滤参数 (2026-01-08 加强)
+MIN_VALID_LEVEL = 100      # 最低有效性等级 (Byte 2) - 提高阈值
+MIN_SIGNAL_QUALITY = 50    # 最低信号质量 (Byte 6) - 提高阈值
+MIN_VALID_COUNT = 5        # 连续有效帧数才认为是真实目标 - 增加要求
+MAX_MISSING_COUNT = 1      # 允许丢失的最大帧数 - 更严格
+
+# 速度合理性检查
+MAX_REL_VELOCITY = 50.0    # 最大合理相对速度 m/s (180km/h)
+MIN_MOVING_VELOCITY = 1.0  # 静止目标阈值 m/s (提高以过滤噪点)
+
+# 近距离静止目标过滤（通常是车身反射或固定障碍物）
+CLOSE_RANGE_THRESHOLD = 8.0      # 近距离阈值 m
+CLOSE_RANGE_QUALITY = 180        # 近距离静止目标需要更高质量
+
+# 地址范围过滤 (0x50-0x5F 区域经常出现固定噪点)
+NOISY_ADDR_START = 0x50
+NOISY_ADDR_END = 0x5F
+
+
+class RadarInterface(RadarInterfaceBase):
+  def __init__(self, CP, CP_SP=None):
+    super().__init__(CP, CP_SP)
+    self.track_id = 0
+    self.addr_to_track_id = {}
+    self.valid_cnt = {}      # 每个地址的有效帧计数
+    self.missing_cnt = {}    # 每个地址的丢失帧计数
+
+  def update(self, can_strings):
+    ret = structs.RadarData()
+    current_targets = set()
+
+    for _, frames in can_strings:
+      for addr, data, src in frames:
+        if src != 1 or not (RADAR_START_ADDR <= addr <= RADAR_END_ADDR):
+          continue
+        if len(data) != 8:
+          continue
+
+        # 解析信号
+        distance = (data[0] | (data[1] << 8)) * DISTANCE_SCALE
+        valid_level = data[2]           # 有效性等级
+        rel_velocity = (data[4] - VELOCITY_OFFSET) * VELOCITY_SCALE
+        signal_quality = data[6]        # 信号质量
+        azimuth = (data[7] - AZIMUTH_OFFSET) * AZIMUTH_SCALE
+
+        # 初始化计数器
+        if addr not in self.valid_cnt:
+          self.valid_cnt[addr] = 0
+          self.missing_cnt[addr] = 0
+
+        # 基础有效性检查
+        range_valid = 0.75 <= distance <= 120.0  # 收紧有效范围，避免近距离噪点
+        azimuth_valid = abs(azimuth) < 25.0      # 收紧角度范围
+        quality_valid = valid_level >= MIN_VALID_LEVEL and signal_quality >= MIN_SIGNAL_QUALITY
+
+        # 速度合理性检查：排除异常速度
+        velocity_valid = abs(rel_velocity) < MAX_REL_VELOCITY
+
+        # 噪点地址过滤：0x50-0x5F区域的静止目标通常是车身反射
+        is_noisy_addr = NOISY_ADDR_START <= addr <= NOISY_ADDR_END
+        if is_noisy_addr and abs(rel_velocity) < MIN_MOVING_VELOCITY:
+          # 噪点地址上的静止目标，忽略
+          velocity_valid = False
+
+        # 近距离静止目标需要更高的质量要求（过滤车身反射和固定障碍物）
+        is_close_static = distance < CLOSE_RANGE_THRESHOLD and abs(rel_velocity) < MIN_MOVING_VELOCITY
+        if is_close_static and valid_level < CLOSE_RANGE_QUALITY:
+          quality_valid = False
+
+        # 更新有效帧计数
+        all_valid = range_valid and azimuth_valid and quality_valid and velocity_valid
+        if all_valid:
+          self.valid_cnt[addr] = min(self.valid_cnt[addr] + 1, 10)
+          self.missing_cnt[addr] = 0
+        else:
+          self.missing_cnt[addr] += 1
+          if self.missing_cnt[addr] > MAX_MISSING_COUNT:
+            self.valid_cnt[addr] = max(self.valid_cnt[addr] - 2, 0)
+
+        # 只有连续多帧有效才认为是真实目标
+        is_real_target = self.valid_cnt[addr] >= MIN_VALID_COUNT
+
+        if is_real_target and all_valid:
+          # 分配trackId
+          if addr not in self.addr_to_track_id:
+            self.addr_to_track_id[addr] = self.track_id
+            self.track_id += 1
+
+          if addr not in self.pts:
+            self.pts[addr] = structs.RadarData.RadarPoint()
+            self.pts[addr].trackId = self.addr_to_track_id[addr]
+
+          # 填充数据
+          azimuth_rad = math.radians(azimuth)
+          self.pts[addr].dRel = distance * math.cos(azimuth_rad)
+          self.pts[addr].yRel = distance * math.sin(azimuth_rad)
+          self.pts[addr].vRel = rel_velocity
+          # xiaomi8 fix: schema 无此字段, 移除
+          # xiaomi8 fix: schema 无此字段, 移除
+          # xiaomi8 fix: schema 无此字段, 移除
+
+          current_targets.add(addr)
+        else:
+          # 目标不可靠，移除
+          if addr in self.pts:
+            del self.pts[addr]
+
+    # 清理过期目标
+    for addr in list(self.pts.keys()):
+      if addr not in current_targets:
+        # 给一点缓冲，不立即删除
+        self.missing_cnt[addr] = self.missing_cnt.get(addr, 0) + 1
+        if self.missing_cnt[addr] > MAX_MISSING_COUNT:
+          del self.pts[addr]
+          self.valid_cnt[addr] = 0
+
+    ret.points = list(self.pts.values())
+    return ret
+

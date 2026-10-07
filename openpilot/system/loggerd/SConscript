@@ -1,6 +1,7 @@
 Import('env', 'arch', 'messaging', 'common', 'visionipc', 'ffmpeg_libs')
 
-libs = [common, messaging, visionipc] + ffmpeg_libs + ['pthread', 'm', 'zstd']
+# xiaomi8: link va/va-drm/drm/x264/z on top of upstream ffmpeg_libs (device static ffmpeg contains vaapi)
+libs = [common, messaging, visionipc] + ffmpeg_libs + ['x264', 'va', 'va-drm', 'drm', 'pthread', 'z', 'm', 'zstd']
 frameworks = []
 
 src = ['logger.cc', 'zstd_writer.cc', 'video_writer.cc', 'encoder/encoder.cc', 'encoder/jpeg_encoder.cc']

@@ -21,7 +21,6 @@ EventName = log.OnroadEvent.EventName
 EventNameSP = custom.OnroadEventSP.EventName
 SafetyModel = structs.CarParams.SafetyModel
 
-
 def make_car_state(brake_pressed=False, regen_braking=False, standstill=False, v_ego=0.0):
   cs = structs.CarState()
   cs.brakePressed = brake_pressed

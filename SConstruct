@@ -196,6 +196,10 @@ _extra_cc = shlex.split(GetOption('ccflags') or '')
 if _extra_cc:
   env.Append(CCFLAGS=_extra_cc)
 
+# xiaomi8: clang-18 on AGNOS lacks arm_neon.h; disable Eigen vectorisation globally
+if arch == "larch64":
+  env.Append(CPPDEFINES=["EIGEN_DONT_VECTORIZE"])
+
 # no --as-needed on mac linker
 if arch != "Darwin":
   env.Append(LINKFLAGS=["-Wl,--as-needed", "-Wl,--no-undefined"])
@@ -253,9 +257,10 @@ def prune_cache_dir(target=None, source=None, env=None):
 
 # Build common module
 SConscript(['openpilot/common/SConscript'])
-Import('_common')
+Import('_common', '_gpucommon')
 common = [_common, 'json11', 'zmq']
-Export('common')
+gpucommon = [_gpucommon]
+Export('common', 'gpucommon')
 
 # Build messaging (cereal + msgq + socketmaster + their dependencies)
 # Enable swaglog include in submodules
@@ -281,17 +286,23 @@ SConscript([
   'openpilot/system/loggerd/SConscript',
 ])
 
-if arch == "comma_arm64":
+# xiaomi8: build camerad on AGNOS/arm64 (arch == "comma_arm64" because /AGNOS exists),
+# on cross-builds (larch64) and on plain aarch64 hosts.
+if arch in ("comma_arm64", "larch64", "aarch64"):
   SConscript(['openpilot/system/camerad/SConscript'])
 
 # Build selfdrive
-SConscript([
-  'openpilot/selfdrive/pandad/SConscript',
-  'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
-  'openpilot/selfdrive/locationd/SConscript',
-  'openpilot/selfdrive/modeld/SConscript',
-  'openpilot/selfdrive/ui/SConscript',
-])
+SConscript(['openpilot/selfdrive/pandad/SConscript'])
+
+# Keep a narrow, opt-in build graph for field repair of pandad. A normal build
+# remains unchanged; PANDAD_ONLY_BUILD=1 avoids initializing modeld/tinygrad.
+if os.getenv("PANDAD_ONLY_BUILD") != "1":
+  SConscript([
+    'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
+    'openpilot/selfdrive/locationd/SConscript',
+    'openpilot/selfdrive/modeld/SConscript',
+    'openpilot/selfdrive/ui/SConscript',
+  ])
 
 SConscript(['openpilot/sunnypilot/SConscript'])
 

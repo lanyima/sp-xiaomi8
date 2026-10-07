@@ -5,6 +5,11 @@ import ctypes
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
+# xiaomi8: force QCOM GPU backend on AGNOS/arm64 (Adreno 630); must be set before tinygrad import.
+# Must match the backend the .pkl models were compiled with (see modeld/SConscript).
+from openpilot.common.hardware import COMMA_HARDWARE
+if "DEV" not in os.environ:
+  os.environ["DEV"] = "QCOM" if COMMA_HARDWARE else "CPU"
 from tinygrad.device import Buffer, Device
 from tinygrad.dtype import DType, dtypes
 from tinygrad.tensor import Tensor
@@ -393,7 +398,16 @@ def main(demo=False):
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.vision_input_names}
     frame_delay = DT_MDL # compensate for time passed since the frame was captured: current_time - timestamp_eof is 50ms on average
     action_delay = DT_MDL / 2 # middle of the interval between model output (current state) and next frame (expected state)
-    lat_action_t = lat_delay + frame_delay + action_delay
+
+    # Keep lateral action timing compatible with the SP2025 modeld path.
+    # lagd's Mi 8 fallback is 0.400 s while it is unestimated.  Adding the
+    # camera/frame (75 ms) prediction here made modeld request curvature at
+    # 0.475 s, while the legacy path requested it at the calibrated 0.400 s.
+    # In a bend that is a systematic 10-20% over-request and causes inward
+    # lane cutting independent of vehicle interface or camera resolution.
+    # Do not apply this to longitudinal planning: it has a distinct actuator
+    # timing model and remains compensated by capture and action timing.
+    lat_action_t = lat_delay
     long_action_t = long_delay + frame_delay + action_delay
     inputs: dict[str, np.ndarray] = {
       'desire_pulse': vec_desire,

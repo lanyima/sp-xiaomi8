@@ -39,7 +39,8 @@ def set_core_affinity(cores: list[int]) -> None:
 
 
 def config_realtime_process(cores: int | list[int], priority: int) -> None:
-  gc.disable()
+  # xiaomi8: gc.disable() causes pycapnp circular-ref memory leak (300MB/min). Use threshold instead.
+  gc.set_threshold(5000, 50, 20)
   if sys.platform == 'linux' and not PC:
     os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(priority))
   c = cores if isinstance(cores, list) else [cores, ]

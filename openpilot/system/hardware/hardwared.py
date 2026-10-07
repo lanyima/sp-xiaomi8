@@ -124,7 +124,18 @@ def touch_thread(end_event):
   event_size = struct.calcsize(event_format)
   event_frame = []
 
-  with open("/dev/input/by-path/platform-894000.i2c-event", "rb") as event_file:
+  # Detect touch input device (comma 3: 894000, Xiaomi 8: a98000)
+  touch_path = None
+  for p in ("/dev/input/by-path/platform-894000.i2c-event",
+            "/dev/input/by-path/platform-a98000.i2c-event"):
+    if os.path.exists(p):
+      touch_path = p
+      break
+  if touch_path is None:
+    cloudlog.warning("No known touch input device found, touch disabled")
+    return
+
+  with open(touch_path, "rb") as event_file:
     fcntl.fcntl(event_file, fcntl.F_SETFL, os.O_NONBLOCK)
     while not end_event.is_set():
       if (count % int(1. / DT_HW)) == 0:
@@ -230,8 +241,15 @@ def hardware_thread(end_event, hw_queue) -> None:
   should_start_prev = False
   in_car = False
   engaged_prev = False
-  pwrsave = False
   offroad_cycle_count = 0
+
+  # C3 direct wiring has neither the comma harness SBU ignition signal nor a
+  # car-specific ignition-CAN hook.  Keep this strictly scoped to the black
+  # Panda in that wiring mode: vehicle voltage must be present and at least
+  # one CAN controller must continue receiving frames.  The short hold avoids
+  # an offroad edge during a single quiet 10 Hz health sample.
+  c3_rx_count_prev = 0
+  c3_can_activity_ticks = 0
 
   params = Params()
   power_monitor = PowerMonitoring()
@@ -243,7 +261,9 @@ def hardware_thread(end_event, hw_queue) -> None:
   HARDWARE.initialize_hardware()
   thermal_config = HARDWARE.get_thermal_config()
 
-  fan_controller = FanController(int(1./DT_HW))
+  # xiaomi8: no comma fan hardware. Upstream re-scans for a peripheral panda
+  # below and creates a FanController then, so None is a supported state.
+  fan_controller = None
   chestnut = Chestnut()
   chestnut_status = ChestnutStatus()
   branch = get_short_branch()
@@ -253,6 +273,7 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     pandaStates = sm['pandaStates']
     peripheralState = sm['peripheralState']
+    peripheral_panda_present = peripheralState.pandaType != log.PandaState.PandaType.unknown
 
     # handle requests to cycle system started state
     if params.get_bool("OnroadCycleRequested"):
@@ -262,12 +283,35 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
 
-      # Set ignition based on any panda connected
-      onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+      # Set ignition based on any panda connected.
+      reported_ignition = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+
+      c3_direct = next((ps for ps in pandaStates if
+                        ps.pandaType == log.PandaState.PandaType.blackPanda and
+                        ps.harnessStatus == log.PandaState.HarnessStatus.notConnected and
+                        ps.voltage >= 9000), None)
+      if c3_direct is not None:
+        c3_rx_count = c3_direct.canState0.totalRxCnt + c3_direct.canState1.totalRxCnt + c3_direct.canState2.totalRxCnt
+        if c3_rx_count > c3_rx_count_prev:
+          c3_can_activity_ticks = 20  # two seconds at pandaStates' 10 Hz
+        elif c3_can_activity_ticks > 0:
+          c3_can_activity_ticks -= 1
+        c3_rx_count_prev = c3_rx_count
+      else:
+        c3_rx_count_prev = 0
+        c3_can_activity_ticks = 0
+
+      onroad_conditions["ignition"] = reported_ignition or c3_can_activity_ticks > 0
 
       pandaState = pandaStates[0]
 
       in_car = pandaState.harnessStatus != log.PandaState.HarnessStatus.notConnected
+
+      # Setup fan handler on first connect to panda
+      # Xiaomi 8: no fan hardware, skip fan controller when NO_FAN is set
+      if fan_controller is None and peripheral_panda_present and os.getenv("NO_FAN") is None:
+        if TICI:
+          fan_controller = FanController()
 
     elif (time.monotonic() - sm.recv_time['pandaStates']) > DISCONNECT_TIMEOUT:
       if onroad_conditions["ignition"]:
@@ -329,7 +373,8 @@ def hardware_thread(end_event, hw_queue) -> None:
     all_comp_temp = all_temp_filter.update(max(temp_sources))
     msg.deviceState.maxTempC = all_comp_temp
 
-    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"])
+    if fan_controller is not None:
+      msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"])
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -350,7 +395,6 @@ def hardware_thread(end_event, hw_queue) -> None:
     startup_conditions["no_excessive_actuation"] = params.get("Offroad_ExcessiveActuation") is None
     startup_conditions["not_uninstalling"] = not params.get_bool("DoUninstall")
     startup_conditions["accepted_terms"] = params.get("HasAcceptedTerms") == terms_version
-    startup_conditions["accepted_terms_sp"] = params.get("HasAcceptedTermsSP") == terms_version_sp
 
     # with 2% left, we killall, otherwise the phone will take a long time to boot
     startup_conditions["free_space"] = msg.deviceState.freeSpacePercent > 2
@@ -372,20 +416,18 @@ def hardware_thread(end_event, hw_queue) -> None:
     # only allow going onroad when:
     # - TIZI, or
     # - TICI and channel_type is "tici"
+    # Xiaomi 8: skip tici branch check — not a real tici device, any branch is fine
     build_metadata = get_build_metadata()
-    is_unsupported_combo = COMMA_HARDWARE and HARDWARE.get_device_type() == "tici" and build_metadata.channel_type != "tici"
-    startup_conditions["not_tici"] = not is_unsupported_combo
-    onroad_conditions["not_tici"] = not is_unsupported_combo
-    set_offroad_alert("Offroad_TiciSupport", is_unsupported_combo, extra_text=build_metadata.channel)
+    is_unsupported_combo = False  # disabled for Xiaomi 8 port
+    startup_conditions["not_tici"] = True
+    onroad_conditions["not_tici"] = True
+    set_offroad_alert("Offroad_TiciSupport", False, extra_text=build_metadata.channel)
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.critical
     extra_text = f"{offroad_comp_temp:.1f}C"
     show_alert = (not onroad_conditions["device_temp_good"] or not startup_conditions["device_temp_engageable"]) and onroad_conditions["ignition"]
     set_offroad_alert_if_changed("Offroad_TemperatureTooHigh", show_alert, extra_text=extra_text)
-
-    if show_alert:
-      msg.deviceState.fanSpeedPercentDesired = 100
 
     # Handle offroad/onroad transition
     should_start = all(onroad_conditions.values())
@@ -395,6 +437,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     if should_start != should_start_prev or (count == 0):
       params.put_bool("IsEngaged", False, block=True)
       engaged_prev = False
+      HARDWARE.set_power_save(not should_start)
 
     if sm.updated['selfdriveState']:
       engaged = sm['selfdriveState'].enabled
@@ -407,11 +450,6 @@ def hardware_thread(end_event, hw_queue) -> None:
           kmsg.write(f"<3>[hardware] engaged: {engaged}\n")
       except Exception:
         pass
-
-    should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
-    if should_pwrsave != pwrsave or (count == 0):
-      HARDWARE.set_power_save(should_pwrsave)
-    pwrsave = should_pwrsave
 
     if should_start:
       off_ts = None
@@ -483,10 +521,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     statlog.gauge("fan_speed_percent_desired", msg.deviceState.fanSpeedPercentDesired)
     statlog.gauge("screen_brightness_percent", msg.deviceState.screenBrightnessPercent)
 
-    # report to server once every 10 minutes, or every 1s when thermally blocked
+    # report to server once every 10 minutes
     rising_edge_started = should_start and not should_start_prev
-    status_packet_interval = 1. if show_alert else 600.
-    if rising_edge_started or (count % int(status_packet_interval / DT_HW)) == 0:
+    if rising_edge_started or (count % int(600. / DT_HW)) == 0:
       dat = {
         'count': count,
         'pandaStates': [strip_deprecated_keys(p.to_dict()) for p in pandaStates],

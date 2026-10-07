@@ -94,6 +94,36 @@ def polling_loop(sensor: Sensor, service: str, event: threading.Event) -> None:
 def main() -> None:
   config_realtime_process([1, ], 1)
 
+  # xiaomi8: detect SLPI-QMI path (ICM-20690) vs I2C LSM6DS3 (comma3/4)
+  use_qmi = False
+  try:
+    with open('/sys/firmware/devicetree/base/model', 'r') as f:
+      model = f.read().strip('\0').strip()
+    if 'dipper' in model.lower() or 'sdm845' in model.lower():
+      use_qmi = True
+      cloudlog.info(f"Device model: {model} -> forcing QMI IMU (ICM-20690)")
+  except Exception:
+    pass
+
+  if not use_qmi:
+    try:
+      import smbus2
+      bus = smbus2.SMBus(I2C_BUS_IMU)
+      who_am_i = bus.read_byte_data(0x6A, 0x0F)
+      bus.close()
+      if who_am_i not in (0x69, 0x6A):
+        use_qmi = True
+        cloudlog.warning(f"LSM6DS3 WHO_AM_I mismatch: 0x{who_am_i:02x}, switching to QMI IMU")
+    except Exception as e:
+      use_qmi = True
+      cloudlog.warning(f"LSM6DS3 I2C not available ({e}), switching to QMI IMU")
+
+  if use_qmi:
+    cloudlog.info("Using QMI IMU (ICM-20690 via SLPI)")
+    from openpilot.system.sensord.sensord_qmi import main as sensord_qmi_main
+    sensord_qmi_main()
+    return
+
   sensors_cfg = [
     (LSM6DS3_Accel(I2C_BUS_IMU), "accelerometer", True),
     (LSM6DS3_Gyro(I2C_BUS_IMU), "gyroscope", True),

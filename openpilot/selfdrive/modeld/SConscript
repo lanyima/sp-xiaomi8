@@ -18,6 +18,9 @@ tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "
 
 camera_configs = [(c.width, c.height) for c in (_ar_ox_fisheye, _os_fisheye)]
 
+# Upstream keys off arch: 'comma_arm64' is AGNOS arm64 (COMMA_HARDWARE), which includes
+# the Xiaomi 8 port (AGNOS 19.5 exposes /AGNOS -> SConstruct maps aarch64 to comma_arm64).
+# DEV=QCOM targets the Adreno 630 GPU and matches the flags modeld.py selects at runtime.
 if arch == 'comma_arm64':
   tg_flags = 'DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
 else:

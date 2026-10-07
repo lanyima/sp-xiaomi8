@@ -93,12 +93,20 @@ class SelfdriveD(CruiseHelper):
     self.gps_location_service = get_gps_location_service(self.params)
     self.gps_packets = [self.gps_location_service]
     self.sensor_packets = ["accelerometer", "gyroscope"]
-    self.camera_packets = ["narrowRoadCameraState", "cabinCameraState", "wideRoadCameraState"]
+    # xiaomi8: HAL3 backend publishes only roadCameraState; NO_DM=1, NO_WIDE=1
+    # by default. Listing absent cams here trips cameraMalfunction every cycle.
+    self.camera_packets = ["roadCameraState"]
+    if os.getenv("NO_WIDE") is None:
+      self.camera_packets.append("wideRoadCameraState")
+    if os.getenv("NO_DM") is None:
+      self.camera_packets.append("driverCameraState")
 
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP']
+    if os.getenv("NO_DM") is not None:
+      ignore += ["driverMonitoringState"]  # xiaomi8: no front cam, dmonitoringd disabled -> never published
     if SIMULATION:
       ignore += ['cabinCameraState', 'managerState']
     if REPLAY:
@@ -563,13 +571,14 @@ class SelfdriveD(CruiseHelper):
     # we want to disengage openpilot. However the status from the panda goes through
     # another socket other than the CAN messages and one can arrive earlier than the other.
     # Therefore we allow a mismatch for two samples, then we trigger the disengagement.
-    if not self.enabled:
-      self.mismatch_counter = 0
-
-    # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-    if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
-           if ps.safetyModel not in IGNORED_SAFETY_MODES):
-      self.mismatch_counter += 1
+    # All pandas not in silent mode must have controlsAllowed when openpilot is
+    # enabled. This is a *consecutive* mismatch window: panda state travels on
+    # a different socket from CAN, so one stale sample is expected, but a
+    # recovered sample must end the window.  Accumulating independent one-frame
+    # drops across a drive turns a later bend into a false Controls Mismatch.
+    controls_mismatch = self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
+                                             if ps.safetyModel not in IGNORED_SAFETY_MODES)
+    self.mismatch_counter = self.mismatch_counter + 1 if controls_mismatch else 0
 
     return CS
 
@@ -686,7 +695,7 @@ class SelfdriveD(CruiseHelper):
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  config_realtime_process(5, Priority.CTRL_HIGH)
   s = SelfdriveD()
   s.run()
 
