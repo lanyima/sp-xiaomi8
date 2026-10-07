@@ -39,6 +39,9 @@ dependencies = [
   "PyJWT[crypto]",
   "websocket_client",
 
+  # sunnypilot
+  "aiohttp",  # sunnypilot models/manager.py: driving model download and status reporting
+
   # joystickd
   "inputs",
 
