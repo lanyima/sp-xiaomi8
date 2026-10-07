@@ -36,12 +36,25 @@ CSV 格式（来自 cabana / panda 录制）：
 import argparse
 import csv
 import os
+import re
 import sys
 import time
 from collections import defaultdict
 
 import cereal.messaging as messaging
 from openpilot.common.realtime import Ratekeeper
+
+# 2026-08-25: 嵌套树探测(真代码在 /data/openpilot/openpilot/ 时, 外层 /data/openpilot/ 只有
+# launch_env.sh)。踩过的坑: 写死 /data/openpilot 在嵌套树上 process_config.py 找不到、
+# manager.py 也找不到, setup() 静默失败或崩。
+REPO_ROOT = '/data/openpilot'
+_nested_pc = os.path.join(REPO_ROOT, 'openpilot', 'system', 'manager', 'process_config.py')
+CODE_ROOT = os.path.join(REPO_ROOT, 'openpilot') if os.path.isfile(_nested_pc) else REPO_ROOT
+LAUNCH_ENV_PATH = os.path.join(REPO_ROOT, 'launch_env.sh')
+PROCESS_CONFIG = os.path.join(CODE_ROOT, 'system', 'manager', 'process_config.py')
+PANDAD_DISABLE_MARK = '# replay_can_csv takeover'
+SIM_ENV_MARK = '# replay_can_csv takeover'
+BUNDLE_BACKUP = '/data/replay_can_csv.CarPlatformBundle.backup'
 
 
 TICK_HZ = 100             # 回放时间分辨率（10ms 桶）
@@ -159,25 +172,125 @@ def build_panda_msg(safety_model: str, ignition: bool):
     return msg
 
 
-def setup():
-    """停掉真实 pandad / openpilot，让出 can+pandaStates topic"""
-    print("[setup] 1/3 stop comma.service ...")
+def _toggle_pandad(disable: bool) -> bool:
+    """process_config.py 里 pandad 那行加/去 enabled=False。正则匹配, 不管模块路径是
+    "selfdrive.pandad.pandad" 还是 "openpilot.selfdrive.pandad.pandad"(分支不同不一样)。
+    ★2026-08-25 加的: 之前 setup() 只临时 pkill 一下 pandad, 没改 process_config.py,
+    manager 重启时(always_run)又把真 pandad 拉起来了 —— 真 pandad 和本工具的合成
+    pandaStates 同一 topic 打架, 导致 selfdrived 报 "Controls Mismatch"(safety_mismatch/
+    controlsAllowed 时有时无)。必须真的在 process_config.py 里禁掉。"""
+    if not os.path.isfile(PROCESS_CONFIG):
+        print(f"[warn] process_config.py 不存在: {PROCESS_CONFIG}")
+        return False
+    with open(PROCESS_CONFIG) as f:
+        cfg = f.read()
+    if disable:
+        if PANDAD_DISABLE_MARK in cfg:
+            return True
+        # Mi 8 gates the real USB panda with enabled=REAL_PANDA_ENABLED.  The
+        # old pattern only matched a bare always_run line, so CSV replay left
+        # real pandad alive and two publishers fought over pandaStates/can.
+        pat = re.compile(r'PythonProcess\("pandad",\s*"([\w.]+)",\s*always_run,\s*enabled=REAL_PANDA_ENABLED\)(,?)')
+        new_cfg, n = pat.subn(
+            lambda m: f'PythonProcess("pandad", "{m.group(1)}", always_run, enabled=False){m.group(2)}  {PANDAD_DISABLE_MARK}',
+            cfg, count=1)
+        if not n:
+            # Compatibility with packages that use the upstream bare form.
+            pat = re.compile(r'PythonProcess\("pandad",\s*"([\w.]+)",\s*always_run\)(,?)')
+            new_cfg, n = pat.subn(
+                lambda m: f'PythonProcess("pandad", "{m.group(1)}", always_run, enabled=False){m.group(2)}  {PANDAD_DISABLE_MARK}',
+                cfg, count=1)
+    else:
+        if PANDAD_DISABLE_MARK not in cfg:
+            return True
+        pat = re.compile(
+            r'PythonProcess\("pandad",\s*"([\w.]+)",\s*always_run,\s*enabled=False\)(,?)\s*' +
+            re.escape(PANDAD_DISABLE_MARK))
+        # Restore the Mi 8 USB-panda gate.  It is intentionally not changed to
+        # unconditional always_run: that reintroduced the phone boot loop when
+        # a panda was connected at power-on.
+        new_cfg, n = pat.subn(
+            lambda m: f'PythonProcess("pandad", "{m.group(1)}", always_run, enabled=REAL_PANDA_ENABLED){m.group(2)}',
+            cfg, count=1)
+    if n:
+        with open(PROCESS_CONFIG, 'w') as f:
+            f.write(new_cfg)
+        return True
+    print("[warn] 没找到 pandad 那一行, process_config.py 格式变了?")
+    return False
+
+
+def setup(safety_model: str):
+    """停掉真实 pandad、让出 can+pandaStates topic、确保 card 能真正 fingerprint。"""
+    print("[setup] 1/4 stop comma.service ...")
     os.system("sudo systemctl stop comma 2>/dev/null")
-    print("[setup] 2/3 kill 残留 pandad/manager ...")
-    os.system("sudo pkill -9 -f 'selfdrive.pandad' 2>/dev/null")
-    os.system("sudo pkill -9 -f 'manager.py' 2>/dev/null")
     time.sleep(2)
-    print("[setup] 3/3 启动 manager（不带 pandad）...")
-    os.system("cd /data/openpilot && nohup python3 system/manager/manager.py > /tmp/manager.log 2>&1 &")
-    time.sleep(3)
+    print("[setup] 2/4 process_config.py 里禁掉真 pandad(避免和本工具的合成 pandaStates 打架)...")
+    _toggle_pandad(disable=True)
+    print("[setup] 3/4 设置 CSV 回放环境（跳过 FW 查询 + SIMULATION）...")
+    with open(LAUNCH_ENV_PATH) as f:
+        env_sh = f.read()
+    if SIM_ENV_MARK not in env_sh:
+        with open(LAUNCH_ENV_PATH, 'a') as f:
+            f.write('\n# replay_can_csv takeover\nexport SKIP_FW_QUERY=1  # replay_can_csv takeover\n'
+                    'export PASSIVE=0  # replay_can_csv takeover\n'
+                    'export SIMULATION=1  # replay_can_csv takeover\n')
+    # A known platform avoids an OBD fingerprint/FW-query timeout during
+    # replay. Preserve a pre-existing bundle byte-for-byte for cleanup.
+    if safety_model == 'geely' and not os.path.exists(BUNDLE_BACKUP):
+        try:
+            from openpilot.common.params import Params
+            params = Params()
+            old = params.get('CarPlatformBundle')
+            if old is not None:
+                with open(BUNDLE_BACKUP, 'wb') as f:
+                    f.write(old)
+            params.put('CarPlatformBundle', {'platform': 'GEELY_BINYUE', 'brand': 'geely'})
+        except Exception as e:
+            print(f"[warn] 无法设置 CarPlatformBundle: {e}")
+    print("[setup] 4/4 清 pyc + 重启 comma.service(用它而不是裸 manager.py —— 才会正确 source"
+          " launch_env.sh 的环境变量, 且嵌套树上路径才对)...")
+    os.system(f"find {REPO_ROOT} -name '*.pyc' -delete 2>/dev/null")
+    os.system("sudo systemctl restart comma 2>/dev/null")
+    print("[setup] 等 manager/card 起来 (20s) ...")
+    time.sleep(20)
     print("[setup] ✓ 完成。现在另起一终端跑 replay_can_csv.py <csv>")
 
 
 def cleanup():
-    """恢复真实 pandad"""
-    print("[cleanup] kill manager + 重启 comma.service ...")
-    os.system("sudo pkill -9 -f 'manager.py' 2>/dev/null")
-    os.system("sudo systemctl start comma 2>/dev/null")
+    """恢复真实 pandad + SKIP_FW_QUERY + 清 CarPlatformBundle。"""
+    print("[cleanup] 1/4 stop comma.service ...")
+    os.system("sudo systemctl stop comma 2>/dev/null")
+    time.sleep(2)
+    print("[cleanup] 2/4 process_config.py 里恢复真 pandad ...")
+    _toggle_pandad(disable=False)
+    print("[cleanup] 3/4 移除 CSV 模拟环境 ...")
+    with open(LAUNCH_ENV_PATH) as f:
+        lines = f.read().split('\n')
+    lines = [l for l in lines if 'replay_can_csv takeover' not in l]
+    with open(LAUNCH_ENV_PATH, 'w') as f:
+        f.write('\n'.join(lines))
+    print("[cleanup] 4/4 恢复 CarPlatformBundle + 重启 comma.service ...")
+    try:
+        from openpilot.common.params import Params
+        params = Params()
+        if os.path.exists(BUNDLE_BACKUP):
+            with open(BUNDLE_BACKUP, 'rb') as f:
+                original_bundle = f.read()
+            # Params.get() may legitimately have returned b'' before replay.
+            # Do not persist an empty bundle: that is neither a valid capnp
+            # bundle nor the absence-of-parameter state we are restoring.
+            if original_bundle:
+                params.put('CarPlatformBundle', original_bundle)
+            else:
+                params.remove('CarPlatformBundle')
+            os.unlink(BUNDLE_BACKUP)
+        else:
+            params.remove('CarPlatformBundle')
+    except Exception as e:
+        print(f"[warn] 无法恢复 CarPlatformBundle: {e}")
+    os.system(f"find {REPO_ROOT} -name '*.pyc' -delete 2>/dev/null")
+    os.system("sudo systemctl restart comma 2>/dev/null")
     print("[cleanup] ✓")
 
 
@@ -191,7 +304,7 @@ def main():
     ap.add_argument("--no-loop", action="store_true",  help="放完一遍就退出（默认 loop）")
     args = ap.parse_args()
 
-    if args.setup:   setup();   return
+    if args.setup:   setup(args.safety);   return
     if args.cleanup: cleanup(); return
     if not args.csv:
         ap.print_help(); sys.exit(2)

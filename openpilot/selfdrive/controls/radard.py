@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import os
 import numpy as np
 from collections import deque
 from typing import Any
@@ -28,6 +29,14 @@ SPEED, ACCEL = 0, 1     # Kalman filter states enum
 V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
+
+# CP2026-style radar-only promotion is Geely-only: ARS410 has a validated
+# lateral target position, unlike interfaces whose yRel is only a placeholder.
+RADAR_ONLY_FALLBACK_VISION_PROB = 0.55
+RADAR_ONLY_CENTER_MAX_DREL = 100.0
+RADAR_ONLY_CENTER_NEAR_DPATH = 1.10
+RADAR_ONLY_CENTER_MID_DPATH = 0.90
+RADAR_ONLY_CENTER_FAR_DPATH = 0.75
 
 
 class KalmanParams:
@@ -195,6 +204,7 @@ class RadarD:
   def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParams, delay: float = 0.0):
     self.CP = CP
     self.CP_SP = CP_SP
+    self.params = Params()
 
     self.current_time = 0.0
 
@@ -210,9 +220,44 @@ class RadarD:
     self.radar_state_valid = False
 
     self.ready = False
+    self.geely_radar_only_fallback = False
+
+  @staticmethod
+  def _radar_only_center_ok(track: Track, model) -> bool:
+    if track.cnt <= 3 or not (3.0 < track.dRel < RADAR_ONLY_CENTER_MAX_DREL):
+      return False
+    if len(model.position.x) < 2 or len(model.position.y) < 2:
+      return False
+    # Radar yRel is opposite in sign to model lateral coordinates. Project the
+    # ego path to target distance so an in-lane target remains valid in bends.
+    path_y = float(np.interp(track.dRel, model.position.x, model.position.y))
+    d_path = abs(track.yRel + path_y)
+    limit = (RADAR_ONLY_CENTER_FAR_DPATH if track.dRel > 80.0 else
+             RADAR_ONLY_CENTER_MID_DPATH if track.dRel > 60.0 else
+             RADAR_ONLY_CENTER_NEAR_DPATH)
+    return d_path < limit
+
+  def _promote_geely_radar_lead(self, model, lead_prob: float) -> None:
+    # Vision remains first choice. The radar-only path is explicit opt-in and
+    # admits only stable, moving, path-centred targets; stationary returns stay
+    # vision-confirmed to avoid roadside false braking.
+    if self.CP.brand != "geely" or not self.geely_radar_only_fallback:
+      return
+    lead_one = self.radar_state.leadOne
+    if lead_one.present and lead_one.modelProb >= RADAR_ONLY_FALLBACK_VISION_PROB:
+      return
+    candidates = [t for t in self.tracks.values()
+                  if t.vLead > 5.0 and self._radar_only_center_ok(t, model)]
+    if not candidates:
+      return
+    candidate = min(candidates, key=lambda t: t.dRel)
+    if lead_one.present and candidate.dRel + 3.0 >= lead_one.dRel:
+      return
+    self.radar_state.leadOne = candidate.get_RadarState(0.02)
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
+    self.geely_radar_only_fallback = self.params.get_bool("GeelyRadarOnlyFallback")
     self.current_time = 1e-9*max(sm.logMonoTime.values())
 
     if sm.recv_frame['carState'] != self.last_v_ego_frame:
@@ -263,6 +308,7 @@ class RadarD:
                                           self.CP, self.CP_SP, low_speed_override=True)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x,
                                           self.CP, self.CP_SP, low_speed_override=False)
+      self._promote_geely_radar_lead(sm['modelV2'], self.lead_prob_filters[0].x)
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

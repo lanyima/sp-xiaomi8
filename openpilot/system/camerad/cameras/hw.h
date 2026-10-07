@@ -38,7 +38,7 @@ const CameraConfig ROAD_CAMERA_CONFIG = {
   .enabled = !getenv("DISABLE_ROAD"),
   .phy = CAM_ISP_IFE_IN_RES_PHY_0,
   .vignetting_correction = true,
-  .output_type = ISP_IFE_PROCESSED,  // Use hardware ISP for demosaic+color+gamma
+  .output_type = ISP_IFE_PROCESSED,  // Use hardware IFE for demosaic+color+gamma
 };
 
 // Also publish as WIDE_ROAD using the same camera for model compatibility

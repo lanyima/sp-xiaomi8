@@ -23,7 +23,13 @@ def clamp(val, min_val, max_val):
   return clamped_val, clamped_val != val
 
 def smooth_value(val, prev_val, tau, dt=DT_MDL):
-  alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
+  # tau <= 0 means "no smoothing": return the new value directly.  The
+  # alpha*val + (1-alpha)*prev_val form evaluates 0 * prev_val when tau <= 0,
+  # and 0 * NaN is NaN, so one non-finite prev_val would otherwise latch NaN
+  # into the output for the rest of the drive.
+  if tau <= 0 or not np.isfinite(prev_val):
+    return val
+  alpha = 1 - np.exp(-dt/tau)
   return alpha * val + (1 - alpha) * prev_val
 
 def clip_curvature(v_ego, prev_curvature, new_curvature, roll) -> tuple[float, bool]:
@@ -64,9 +70,12 @@ def curv_from_psis(psi_target, psi_rate, vego, action_t):
   return 2*curv_from_psi - psi_rate / vego
 
 def get_curvature_from_plan(yaws, yaw_rates, t_idxs, vego, action_t):
-  if action_t < MIN_STABLE_DELAY:
-    psi_target = (action_t / MIN_STABLE_DELAY) * np.interp(MIN_STABLE_DELAY, t_idxs, yaws)
-  else:
-    psi_target = np.interp(action_t, t_idxs, yaws)
+  # Below MIN_STABLE_DELAY the old expression scaled psi_target by
+  # action_t / MIN_STABLE_DELAY and then divided by action_t again, so the
+  # action_t factor cancels.  Evaluating directly at the clamped time is
+  # mathematically identical for any action_t in (0, MIN_STABLE_DELAY) and
+  # avoids the 0/0 -> NaN evaluation when action_t is exactly 0.
+  t_eff = max(action_t, MIN_STABLE_DELAY)
+  psi_target = np.interp(t_eff, t_idxs, yaws)
   psi_rate = yaw_rates[0]
-  return curv_from_psis(psi_target, psi_rate, vego, action_t)
+  return curv_from_psis(psi_target, psi_rate, vego, t_eff)

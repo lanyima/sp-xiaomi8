@@ -7,3 +7,15 @@ if arch != "Darwin":
   camera_obj = env.Object('cameras/camera_android_hal.cc')
   camera_common_obj = env.Object('cameras/camera_common.cc')
   env.Program('camerad_hal_v2', ['main.cc', camera_obj, camera_common_obj], LIBS=libs)
+
+  # Xiaomi 8 production V4L2/CSL route. Keep this separate from the HAL
+  # target so source edits can be built and validated without changing HAL.
+  v4l2_qcom2_obj = env.Object('cameras/camera_qcom2.cc')
+  v4l2_spectra_obj = env.Object('cameras/spectra.cc')
+  v4l2_cdm_obj = env.Object('cameras/cdm.cc')
+  v4l2_sensor_objs = [
+    env.Object('sensors/imx363.cc'),
+    env.Object('sensors/ox03c10.cc'),
+    env.Object('sensors/os04c10.cc'),
+  ]
+  env.Program('camerad_v4l2', ['main.cc', v4l2_qcom2_obj, v4l2_spectra_obj, v4l2_cdm_obj, camera_common_obj] + v4l2_sensor_objs, LIBS=libs)

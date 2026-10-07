@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import pyray as rl
 from dataclasses import dataclass
 
+from openpilot.cereal import log
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -346,3 +347,69 @@ class AltitudeElement(GpsInfoElement):
 
     value = f"{altitude:.1f}" if gps_accuracy != 0.0 else "-"
     return UiElement(value, "ALT.", self.unit, rl.WHITE)
+
+
+class UsagePercentElement:
+  """Base for CPU/GPU/MEM %usage — 三档变色阈值可由子类覆盖"""
+  WARN_PCT = 70
+  DANGER_PCT = 90
+
+  def __init__(self, label: str):
+    self.label = label
+    self.unit = "%"
+
+  def _color(self, value: float) -> rl.Color:
+    if value > self.DANGER_PCT:
+      return rl.RED
+    elif value > self.WARN_PCT:
+      return rl.Color(255, 188, 0, 255)  # Orange
+    return rl.WHITE
+
+
+class CpuUsageElement(UsagePercentElement):
+  def __init__(self):
+    super().__init__("CPU")
+
+  def update(self, sm, is_metric: bool) -> UiElement:
+    cpu_usage = sm['deviceState'].cpuUsagePercent
+    value = (sum(cpu_usage) / len(cpu_usage)) if len(cpu_usage) else 0.0
+    return UiElement(f"{value:.0f}", self.label, self.unit, self._color(value))
+
+
+class GpuUsageElement(UsagePercentElement):
+  def __init__(self):
+    super().__init__("GPU")
+
+  def update(self, sm, is_metric: bool) -> UiElement:
+    value = float(sm['deviceState'].gpuUsagePercent)
+    return UiElement(f"{value:.0f}", self.label, self.unit, self._color(value))
+
+
+class MemoryUsageElement(UsagePercentElement):
+  DANGER_PCT = 90
+  WARN_PCT = 80
+
+  def __init__(self):
+    super().__init__("MEM")
+
+  def update(self, sm, is_metric: bool) -> UiElement:
+    value = float(sm['deviceState'].memoryUsagePercent)
+    return UiElement(f"{value:.0f}", self.label, self.unit, self._color(value))
+
+
+class DeviceTempElement:
+  """设备最高温度, 颜色直接用 hardwared 自己判的 thermalStatus (跟fan/降频决策同一套阈值), 不自己再猜温度线"""
+  def __init__(self):
+    self.unit = "°C"
+
+  def update(self, sm, is_metric: bool) -> UiElement:
+    device_state = sm['deviceState']
+    value = device_state.maxTempC
+    thermal_status = device_state.thermalStatus
+    if thermal_status == log.DeviceState.ThermalStatus.critical:
+      color = rl.RED
+    elif thermal_status == log.DeviceState.ThermalStatus.overheated:
+      color = rl.Color(255, 188, 0, 255)
+    else:
+      color = rl.WHITE
+    return UiElement(f"{value:.0f}", "TEMP", self.unit, color)

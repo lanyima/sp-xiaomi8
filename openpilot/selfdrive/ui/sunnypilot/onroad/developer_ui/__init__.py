@@ -12,7 +12,8 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.developer_ui.elements import (
   UiElement, RelDistElement, RelSpeedElement, SteeringAngleElement,
   DesiredLateralAccelElement, ActualLateralAccelElement, DesiredSteeringAngleElement,
   AEgoElement, LeadSpeedElement, FrictionCoefficientElement, LatAccelFactorElement,
-  SteeringTorqueEpsElement, BearingDegElement, AltitudeElement, DesiredSteeringPIDElement
+  SteeringTorqueEpsElement, BearingDegElement, AltitudeElement, DesiredSteeringPIDElement,
+  CpuUsageElement, GpuUsageElement, MemoryUsageElement, DeviceTempElement
 )
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -53,6 +54,10 @@ class DeveloperUiRenderer(Widget):
     self.steering_torque_elem = SteeringTorqueEpsElement()
     self.bearing_elem = BearingDegElement()
     self.altitude_elem = AltitudeElement()
+    self.cpu_elem = CpuUsageElement()
+    self.gpu_elem = GpuUsageElement()
+    self.mem_elem = MemoryUsageElement()
+    self.temp_elem = DeviceTempElement()
 
   def _update_state(self) -> None:
     self.dev_ui_mode = ui_state.developer_ui
@@ -157,6 +162,14 @@ class DeveloperUiRenderer(Widget):
     # Add altitude if GPS available
     if sm.valid['gpsLocationExternal'] or sm.valid['gpsLocation']:
       elements.append(self.altitude_elem.update(sm, ui_state.is_metric))
+
+    # 手机(设备)系统资源占用, 常驻显示
+    elements.extend([
+      self.cpu_elem.update(sm, ui_state.is_metric),
+      self.gpu_elem.update(sm, ui_state.is_metric),
+      self.mem_elem.update(sm, ui_state.is_metric),
+      self.temp_elem.update(sm, ui_state.is_metric),
+    ])
 
     if not elements:
       return

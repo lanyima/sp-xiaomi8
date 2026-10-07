@@ -83,8 +83,16 @@ class Controls(ControlsExt):
 
     # Update VehicleModel
     lp = self.sm['liveParameters']
-    x = max(lp.stiffnessFactor, 0.1)
-    sr = max(lp.steerRatio, 0.1)
+    # On this Mi 8 build the common camera/IMU observation chain has repeatedly
+    # driven paramsd to invalid steering geometry (Geely: 15.0 -> 20.94 with
+    # stiffness 0.818 in a recorded bend).  That turns a -5.83 degree physical
+    # request into -8.25 degrees before the PID even begins correcting; it is
+    # the common cause of inward cutting on either bend direction.  Keep live
+    # parameters for roll and steering-zero, but use each platform's measured
+    # CarParams geometry for all lateral control until a per-platform learner is
+    # validated on this hardware.
+    x = 1.0
+    sr = self.CP.steerRatio
     self.VM.update_params(x, sr)
 
     steer_angle_without_offset = math.radians(CS.steeringAngleDeg - lp.angleOffsetDeg)

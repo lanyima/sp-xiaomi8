@@ -55,7 +55,7 @@ assert arch in [
   "Darwin",   # macOS arm64 (x86 not supported)
 ]
 
-pkg_names = ['acados', 'bzip2', 'capnproto', 'catch2', 'eigen', 'ffmpeg', 'json11', 'ncurses', 'zeromq', 'zstd']
+pkg_names = ['acados', 'bzip2', 'capnproto', 'catch2', 'eigen', 'ffmpeg', 'json11', 'libusb', 'ncurses', 'zeromq', 'zstd']
 pkgs = [importlib.import_module(name) for name in pkg_names]
 acados = pkgs[pkg_names.index('acados')]
 ffmpeg = pkgs[pkg_names.index('ffmpeg')]
@@ -88,7 +88,7 @@ acados_include_dirs = [
 allowed_system_libs = {
   "EGL", "GLESv2", "GL",
   "Qt5Charts", "Qt5Core", "Qt5Gui", "Qt5Widgets",
-  "dl", "drm", "gbm", "m", "pthread",
+  "dl", "drm", "gbm", "m", "pthread", "z",
 }
 
 def _resolve_lib(env, name):
@@ -290,13 +290,18 @@ if arch == "larch64" or arch == "aarch64":
   SConscript(['openpilot/system/camerad/SConscript'])
 
 # Build selfdrive
-SConscript([
-  'openpilot/selfdrive/pandad/SConscript',
-  'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
-  'openpilot/selfdrive/locationd/SConscript',
-  'openpilot/selfdrive/modeld/SConscript',
-  'openpilot/selfdrive/ui/SConscript',
-])
+SConscript(['openpilot/selfdrive/pandad/SConscript'])
+
+# Targeted on-device repairs (for example pandad) must not initialize modeld's
+# tinygrad compiler merely to link an unrelated binary. This is opt-in and
+# leaves the normal full build graph unchanged.
+if os.getenv("PANDAD_ONLY_BUILD") != "1":
+  SConscript([
+    'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
+    'openpilot/selfdrive/locationd/SConscript',
+    'openpilot/selfdrive/modeld/SConscript',
+    'openpilot/selfdrive/ui/SConscript',
+  ])
 
 SConscript(['openpilot/sunnypilot/SConscript'])
 

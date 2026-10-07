@@ -209,6 +209,20 @@ class TestLateralMismatchCounter:
       mads.data_sample()
     assert mads.lateral_mismatch_counter == 200
 
+  def test_resolved_sample_resets_mismatch_window(self, mocker):
+    mads, sd = make_mads(mocker, MadsSteeringModeOnBrake.PAUSE)
+    mads.enabled = True
+    mads.active = True
+    sd.sm['pandaStates'] = [make_panda_state(mocker, False)]
+
+    for _ in range(199):
+      mads.data_sample()
+    assert mads.lateral_mismatch_counter == 199
+
+    sd.sm['pandaStates'] = [make_panda_state(mocker, True)]
+    mads.data_sample()
+    assert mads.lateral_mismatch_counter == 0
+
 
 # brand restrictions
 

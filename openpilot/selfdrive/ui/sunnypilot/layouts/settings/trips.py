@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import json
 import requests
 import threading
 import time
@@ -53,8 +54,12 @@ class TripsLayout(Widget):
     if not stats:
       return {}
     try:
-      return stats
-    except Exception:
+      # Params stores bytes.  DriveStats is declared as JSON, so never hand the
+      # raw value to the renderer: bytes has no ``get`` and a stale/bad cache
+      # must not make the settings UI fail.
+      decoded = json.loads(stats.decode("utf-8"))
+      return decoded if isinstance(decoded, dict) else {}
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
       cloudlog.exception(f"Failed to decode drive stats: {stats}")
       return {}
 
@@ -67,8 +72,11 @@ class TripsLayout(Widget):
       response = api_get(f"v1.1/devices/{dongle_id}/stats", access_token=identity_token, session=self._session)
       if response.status_code == 200:
         data = response.json()
+        if not isinstance(data, dict):
+          raise ValueError("Drive-stats API returned a non-object JSON response")
         self._stats = data
-        self._params.put(self.PARAM_KEY, data)
+        # Params accepts a serialized JSON value, not a Python dict.
+        self._params.put(self.PARAM_KEY, json.dumps(data, separators=(",", ":")))
     except Exception as e:
       cloudlog.error(f"Failed to fetch drive stats: {e}")
 

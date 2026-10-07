@@ -3,7 +3,7 @@ import os
 os.environ['GMMU'] = '0' # for usbgpu fast loading, noop for qcom
 # xiaomi8: force QCOM GPU backend on TICI (Adreno 630); must be set before tinygrad import.
 # Experimental — validate on device; flip to CPU if the QCOM backend is unstable with the compiled model.
-from openpilot.system.hardware import TICI
+from openpilot.common.hardware import TICI
 if "DEV" not in os.environ:
   os.environ["DEV"] = "QCOM" if TICI else "CPU"
 from tinygrad.tensor import Tensor
@@ -23,9 +23,11 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
+from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan, MIN_STABLE_DELAY
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
-from openpilot.selfdrive.modeld.compile_modeld import make_input_queues, WARP_INPUTS, POLICY_INPUTS
+from openpilot.selfdrive.modeld import compile_modeld
+from openpilot.selfdrive.modeld.compile_modeld import NV12Frame, make_input_queues, make_warp, WARP_INPUTS, POLICY_INPUTS
+from tinygrad.engine.jit import TinyJit
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
 from openpilot.common.file_chunker import open_file_chunked, get_manifest_path
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
@@ -104,7 +106,20 @@ class ModelState(ModelStateBase):
     self.parser = Parser()
     self.frame_buf_params = {k: get_nv12_info(cam_w, cam_h) for k in ('img', 'big_img')}
     self.run_policy = jits['run_policy']
-    self.warp = jits[(cam_w,cam_h)]
+    warp_key = (cam_w, cam_h)
+    if warp_key in jits:
+      self.warp = jits[warp_key]
+    else:
+      # Xiaomi 8 V4L2 outputs 1920x1080. The upstream package only embeds
+      # warps for comma camera sizes; using either of those here misreads NV12
+      # stride/plane offsets. Build a JIT for the actual VisionIPC geometry.
+      compile_modeld.WARP_DEV = self.WARP_DEV
+      nv12 = NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
+      input_h, input_w = self.input_shapes['img'][2:]
+      # The packed 6-channel tensor is half the YUV warp resolution in each
+      # dimension (see frames_to_tensor); policy expects 128x256 here.
+      self.warp = TinyJit(make_warp(nv12, input_w * 2, input_h * 2, self.frame_skip), prune=True)
+      cloudlog.warning(f"modeld runtime warp for nonstandard camera {cam_w}x{cam_h}")
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     parsed_model_outputs = {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
@@ -258,8 +273,19 @@ def main(demo=False):
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
     if sm.frame % 60 == 0:
-      model.lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay)
+      # liveDelay is not guaranteed to have arrived yet: before the first message
+      # SubMaster reports alive/valid False and the struct reads back 0.0.  Feeding
+      # that through as action_t made modeld evaluate curvature at t=0, i.e.
+      # 0/0 -> NaN, and that NaN then latched into prev_action via smooth_value for
+      # the rest of the drive (latActive stayed true while torque was 0).  Only
+      # accept a finite, strictly positive delay.
+      if sm.alive['liveDelay'] and sm.valid['liveDelay']:
+        candidate = get_lat_delay(params, sm["liveDelay"].lateralDelay)
+        if np.isfinite(candidate) and candidate > 0.0:
+          model.lat_delay = candidate
     lat_delay = model.lat_delay + LAT_SMOOTH_SECONDS
+    if not np.isfinite(lat_delay) or lat_delay <= 0.0:
+      lat_delay = MIN_STABLE_DELAY
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
@@ -289,7 +315,10 @@ def main(demo=False):
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.vision_input_names}
     frame_delay = DT_MDL # compensate for time passed since the frame was captured: current_time - timestamp_eof is 50ms on average
     action_delay = DT_MDL / 2 # middle of the interval between model output (current state) and next frame (expected state)
-    lat_action_t = lat_delay + frame_delay + action_delay
+    # Mi 8: lagd never estimates (validBlocks=0), so lat_delay is the hard-coded
+    # 0.400s fallback. Adding frame+action prediction (75ms) made modeld request
+    # curvature at 0.475s -> systematic over-request in bends -> cutting inside.
+    lat_action_t = lat_delay
     long_action_t = long_delay + frame_delay + action_delay
     inputs: dict[str, np.ndarray] = {
       'desire_pulse': vec_desire,

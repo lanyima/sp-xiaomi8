@@ -284,7 +284,12 @@ int V4LEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
 
   // push buffer
   extras.push(*extra);
-  //buf->sync(VISIONBUF_SYNC_TO_DEVICE);
+  // camerad_v4l2 writes this VisionBuf from the CPU.  Venus is a separate
+  // DMA device, so flush the CPU cache before queueing the buffer.  Without
+  // this the encoder can repeatedly read the initial stale frame: modeld
+  // remains healthy (it reads on the CPU), while fcamera.hevc freezes and
+  // eventually stops rotating.
+  buf->sync(VISIONBUF_SYNC_TO_DEVICE);
   queue_buffer(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, buffer_in, buf, timestamp);
 
   return this->counter++;

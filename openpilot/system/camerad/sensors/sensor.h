@@ -12,6 +12,7 @@
 #include "openpilot/cereal/gen/cpp/log.capnp.h"
 #include "system/camerad/sensors/ox03c10_registers.h"
 #include "system/camerad/sensors/os04c10_registers.h"
+#include "system/camerad/sensors/imx363_registers.h"
 
 #define ANALOG_GAIN_MAX_CNT 55
 
@@ -80,7 +81,16 @@ public:
   }
   std::vector<uint32_t> linearization_lut;     // length 36
   std::vector<uint32_t> linearization_pts;     // length 4
-  std::vector<uint32_t> vignetting_lut;        // length 221
+  std::vector<uint32_t> vignetting_lut;        // length 221, GRR bank {gr[25:13], r[12:0]}
+  // Optional GBB bank {gb[25:13], b[12:0]}. Empty => spectra.cc reuses the GRR table for
+  // both banks (the historical behaviour, kept for sensors with no separate measurement).
+  std::vector<uint32_t> vignetting_lut_gbb;
+  // IFE ABF34 noise-standard LUT. This is optional so the other QCOM sensors
+  // keep their existing pipeline untouched.
+  std::vector<uint32_t> abf34_noise_lut;
+  // Consecutive 64-word factory ABF34 LUT profiles, ordered by AEC gain.
+  // The Spectra path selects one profile per IFE request.
+  std::vector<std::vector<uint32_t>> abf34_noise_lut_profiles;
 
   const int num() const {
     return static_cast<int>(image_sensor);
@@ -98,6 +108,14 @@ public:
 class OS04C10 : public SensorInfo {
 public:
   OS04C10();
+  std::vector<i2c_random_wr_payload> getExposureRegisters(int exposure_time, int new_exp_g, bool dc_gain_enabled) const override;
+  float getExposureScore(float desired_ev, int exp_t, int exp_g_idx, float exp_gain, int gain_idx) const override;
+  int getSlaveAddress(int port) const override;
+};
+
+class IMX363 : public SensorInfo {
+public:
+  IMX363();
   std::vector<i2c_random_wr_payload> getExposureRegisters(int exposure_time, int new_exp_g, bool dc_gain_enabled) const override;
   float getExposureScore(float desired_ev, int exp_t, int exp_g_idx, float exp_gain, int gain_idx) const override;
   int getSlaveAddress(int port) const override;

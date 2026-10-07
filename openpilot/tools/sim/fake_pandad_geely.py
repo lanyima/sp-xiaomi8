@@ -95,12 +95,19 @@ RUN_SETUP   = '--setup' in ARGS
 RUN_CLEANUP = '--cleanup' in ARGS
 NO_RESTART  = '--no-restart' in ARGS
 
+# --csv=PATH : 回放真实抓包的 CAN（time,addr,bus,data）替代合成数据 —— 模拟原车启动
+CSV_PATH = None
+CSV_NO_LOOP = '--no-loop' in ARGS
+for _a in sys.argv[1:]:
+  if _a.startswith('--csv='):
+    CSV_PATH = _a.split('=', 1)[1]
+
 LAUNCH_ENV_PATH = '/data/openpilot/launch_env.sh'
-PROCESS_CONFIG  = '/data/openpilot/system/manager/process_config.py'
+PROCESS_CONFIG  = '/data/openpilot/openpilot/system/manager/process_config.py'
 SETUP_MARKER    = '# xiaomi8 fake_pandad SETUP marker'
 PANDAD_DISABLE_MARK  = '# fake_pandad takeover'
-PANDAD_ENABLE_LINE   = 'PythonProcess("pandad", "selfdrive.pandad.pandad", always_run)'
-PANDAD_DISABLE_LINE  = 'PythonProcess("pandad", "selfdrive.pandad.pandad", always_run, enabled=False),  # fake_pandad takeover'
+PANDAD_ENABLE_LINE   = 'PythonProcess("pandad", "openpilot.selfdrive.pandad.pandad", always_run)'
+PANDAD_DISABLE_LINE  = 'PythonProcess("pandad", "openpilot.selfdrive.pandad.pandad", always_run, enabled=False),  # fake_pandad takeover'
 
 
 def _run(cmd, **kw):
@@ -117,8 +124,15 @@ def setup_env():
   # 这里必须用 venv 的 python（params 是 Cython 编译的 .so）
   # 直接在本进程里导入 Params 即可
   from openpilot.common.params import Params
+  from openpilot.common.version import terms_version, training_version
   p = Params()
   p.put("CarPlatformBundle", {"platform": "GEELY_BINYUE", "brand": "geely"})
+
+  # 跳过 onboarding（条款+训练），否则 hardwared 的 accepted_terms/completed_training
+  # 条件不满足 → deviceState.started 永远 False → 即使点火也不 onroad。
+  p.put("HasAcceptedTerms", terms_version)
+  p.put("CompletedTrainingVersion", training_version)
+  p.put_bool("DisableUpdates", True)
 
   print("[setup] 3/5 禁用真实 pandad（避免和 fake_pandad 抢 pandaStates topic）...")
   with open(PROCESS_CONFIG) as f:
@@ -128,11 +142,13 @@ def setup_env():
     with open(PROCESS_CONFIG, 'w') as f:
       f.write(cfg)
 
-  print("[setup] 4/5 加 SKIP_FW_QUERY=1 + PASSIVE=1 到 launch_env.sh ...")
+  # v4.9.76: PASSIVE=0(主动模式) —— PASSIVE=1 会让 op 进"被动"少跑感知/UI,
+  # 导致看不到行车画面(modelV2/车道线)。sp2025 能跑的最简版本本来就不设 PASSIVE。
+  print("[setup] 4/5 加 SKIP_FW_QUERY=1 + PASSIVE=0 到 launch_env.sh ...")
   with open(LAUNCH_ENV_PATH) as f:
     env_sh = f.read()
   if SETUP_MARKER not in env_sh:
-    env_sh += f"\n{SETUP_MARKER}\nexport SKIP_FW_QUERY=1\nexport PASSIVE=1\n"
+    env_sh += f"\n{SETUP_MARKER}\nexport SKIP_FW_QUERY=1\nexport PASSIVE=0\n"
     with open(LAUNCH_ENV_PATH, 'w') as f:
       f.write(env_sh)
 
@@ -529,23 +545,113 @@ def build_cam_messages(packer, s):
 # pandaStates 构建
 # ──────────────────────────────────────────────
 def send_panda_states(pm, s):
-    """发布 pandaStates 消息，模拟 black panda 已连接、点火、控制允许。"""
+    """发布 pandaStates 消息，模拟 black panda 已连接、点火、控制允许。
+    防御式赋值: 不同 fork/cereal 版本字段有差异(如 sp2025 无 controlsAllowedLateral),
+    字段不存在就跳过, 避免 AttributeError 崩溃(否则 sim 一起就崩, 永不 onroad)。"""
     dat = messaging.new_message('pandaStates', 1)
     dat.valid = True
     ps = dat.pandaStates[0]
-    ps.ignitionLine              = s.ignition
-    ps.ignitionCan               = False
-    ps.pandaType                 = "blackPanda"
-    ps.safetyModel               = "geely"
-    ps.safetyParam               = 0         # stock longitudinal
-    ps.alternativeExperience     = 0
-    ps.controlsAllowed           = True
-    ps.controlsAllowedLateral    = True
-    ps.controlsAllowedLongitudinal = True
-    ps.faultStatus               = 0
-    ps.powerSaveEnabled          = False
-    ps.heartbeatLost             = False
+
+    def _set(field, value):
+        try:
+            setattr(ps, field, value)
+        except Exception:
+            pass
+
+    _set("ignitionLine", s.ignition)
+    _set("ignitionCan", False)
+    _set("pandaType", "blackPanda")
+    _set("safetyModel", "geely")
+    _set("safetyParam", 0)
+    _set("alternativeExperience", 0)
+    _set("controlsAllowed", True)
+    _set("controlsAllowedLateral", True)          # 新版 sunnypilot 才有
+    _set("controlsAllowedLongitudinal", True)     # 新版 sunnypilot 才有
+    _set("faultStatus", 0)
+    _set("powerSaveEnabled", False)
+    _set("heartbeatLost", False)
     pm.send('pandaStates', dat)
+
+
+# ──────────────────────────────────────────────
+# CSV 回放（真实原车抓包）—— 模拟原车启动
+# ──────────────────────────────────────────────
+PANDA_DT = 0.1  # pandaStates 周期 (10 Hz)
+
+
+def _parse_csv_line(line):
+    """解析一行 'time,addr,bus,data' → (t, addr, bus, data_bytes)，坏行返回 None。"""
+    parts = line.rstrip('\n').split(',')
+    if len(parts) != 4:
+        return None
+    try:
+        t    = float(parts[0])
+        addr = int(parts[1], 16)
+        # bus & 0x7F：抹掉 panda TX 回显标志 (128+N)，让 cam(130)→2、pt(128)→0 落到 openpilot 期望的总线
+        bus  = int(parts[2]) & 0x7F
+        d    = parts[3].strip()
+        data = bytes.fromhex(d[2:] if d[:2].lower() == '0x' else d)
+    except Exception:
+        return None
+    return t, addr, bus, data
+
+
+def replay_csv(pm, path, s, loop=True):
+    """流式回放 CSV 的 CAN，按录制时间戳节奏发到 can topic；同时 10Hz 发 pandaStates（点火）。
+
+    关键: 真 panda(boardd) 是把一段时间窗内收到的所有 CAN 帧**攒成一条 can 消息、~100Hz 发**。
+    如果按 CSV 每个毫秒时间戳各发一条(可到 ~1000Hz), card_thread 会被这个 can 洪泛拉到几百 Hz
+    空转 convert_carControlSP(每步一次 capnp to_dict, 很贵) → card 吃满一个核, 把 UI 饿死/卡顿。
+    所以这里**限制 can 发送为 100Hz**(SEND_DT=10ms), 期间攒帧, 到点一次性发, 模拟真 panda。
+    """
+    SEND_DT = 0.01  # 100Hz — 跟真 panda 一致, 别把 card 拉爆
+    print(f"[fake_pandad] CSV 回放: {path}  loop={loop} (can 批量 {int(1/SEND_DT)}Hz)")
+    while not stop_event.is_set():
+        with open(path) as f:
+            f.readline()  # 跳过表头
+            start = time.monotonic()
+            last_send = start
+            last_panda = start
+            t0 = None
+            batch = []
+
+            def _tick():
+                # 到点就把攒的 CAN 批量发出去(100Hz) + 维持 pandaStates(10Hz)
+                nonlocal batch, last_send, last_panda
+                now_m = time.monotonic()
+                if batch and now_m - last_send >= SEND_DT:
+                    pm.send('can', can_list_to_can_capnp(batch))
+                    batch = []
+                    last_send = now_m
+                if now_m - last_panda >= PANDA_DT:
+                    send_panda_states(pm, s)
+                    last_panda = now_m
+
+            for line in f:
+                if stop_event.is_set():
+                    return
+                row = _parse_csv_line(line)
+                if row is None:
+                    continue
+                t, addr, bus, data = row
+                if t0 is None:
+                    t0 = t
+                # 按录制时刻给这一帧节奏; 等待期间照常 100Hz 发批 + 10Hz pandaStates
+                while not stop_event.is_set():
+                    now = time.monotonic() - start
+                    if now >= (t - t0):
+                        break
+                    _tick()
+                    time.sleep(min((t - t0) - now, 0.003))
+                batch.append((addr, data, bus))
+                _tick()
+            # 收尾最后一批
+            if batch and not stop_event.is_set():
+                pm.send('can', can_list_to_can_capnp(batch))
+        print(f"[fake_pandad] CSV 回放完一遍{'，循环重播' if loop else ''}")
+        if not loop:
+            stop_event.set()
+            return
 
 
 # ──────────────────────────────────────────────
@@ -558,13 +664,19 @@ def main():
     print("[fake_pandad_geely] 启动 —— 按 's' 查看状态，'q' 退出")
     print("  i=点火切换  a=ACC激活  +/-=速度±5kph  [/]=转向角±5°  b=刹车")
 
-    packer = CANPacker(DBC_NAME)
-    pm     = messaging.PubMaster(['can', 'pandaStates'])
+    pm = messaging.PubMaster(['can', 'pandaStates'])
 
-    # 键盘线程
+    # 键盘线程（CSV 模式下仍可用 'i' 切点火、'q' 退出）
     kb_thread = threading.Thread(target=keyboard_thread, daemon=True)
     kb_thread.start()
 
+    # ── CSV 回放模式：喂真实原车抓包 ──
+    if CSV_PATH is not None:
+        replay_csv(pm, CSV_PATH, state, loop=not CSV_NO_LOOP)
+        return
+
+    # ── 合成模式：程序生成 CAN ──
+    packer = CANPacker(DBC_NAME)
     rk    = Ratekeeper(CTRL_HZ, print_delay_threshold=None)
     frame = 0
 

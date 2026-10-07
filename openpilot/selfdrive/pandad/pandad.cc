@@ -4,6 +4,7 @@
 #include <bitset>
 #include <cassert>
 #include <cerrno>
+#include <fstream>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -23,6 +24,17 @@
 
 ExitHandler do_exit;
 
+// Persist only state *transitions* while investigating MADS Panda agreement.
+// This records the reason for a safety disengagement without changing any
+// safety decision.  It is intentionally on /data rather than /tmp so a short
+// on-road drive can be inspected after returning off-road.
+void mads_diag(const std::string &line) {
+  std::ofstream out("/data/pandad_mads_diag.log", std::ios::app);
+  if (out.good()) {
+    out << nanos_since_boot() << " " << line << "\n";
+  }
+}
+
 bool check_connected(Panda *panda) {
   if (!panda->connected()) {
     do_exit = true;
@@ -33,7 +45,23 @@ bool check_connected(Panda *panda) {
 
 bool process_mads_heartbeat(SubMaster *sm) {
   const auto &mads = (*sm)["selfdriveStateSP"].getSelfdriveStateSP().getMads();
-  return sm->allAliveAndValid({"selfdriveStateSP"}) && mads.getEnabled();
+  const bool state_valid = sm->allAliveAndValid({"selfdriveStateSP"});
+  const bool mads_enabled = mads.getEnabled();
+  const bool heartbeat_mads = state_valid && mads_enabled;
+
+  static int previous_valid = -1;
+  static int previous_enabled = -1;
+  static int previous_heartbeat = -1;
+  if ((previous_valid != state_valid) || (previous_enabled != mads_enabled) ||
+      (previous_heartbeat != heartbeat_mads)) {
+    mads_diag("heartbeat state_valid=" + std::to_string(state_valid) +
+              " mads_enabled=" + std::to_string(mads_enabled) +
+              " sent=" + std::to_string(heartbeat_mads));
+    previous_valid = state_valid;
+    previous_enabled = mads_enabled;
+    previous_heartbeat = heartbeat_mads;
+  }
+  return heartbeat_mads;
 }
 
 Panda *connect(std::string serial) {
@@ -143,8 +171,10 @@ void fill_panda_state(cereal::PandaState::Builder &ps, cereal::PandaState::Panda
   ps.setSbu1Voltage(health.sbu1_voltage_mV / 1000.0f);
   ps.setSbu2Voltage(health.sbu2_voltage_mV / 1000.0f);
   ps.setSoundOutputLevel(health.sound_output_level_pkt);
-  ps.setControlsAllowedLateral(health.controls_allowed_lateral_pkt);
-  ps.setControlsAllowedLongitudinal(health.controls_allowed_longitudinal_pkt);
+  // xiaomi8: 新基座(sync#120)把 lateral/longitudinal 合进 controls_allowed_sp_pkt 位域
+  // bit0 = lateral(controls_allowed||controls_allowed_lateral), bit1 = longitudinal(controls_allowed)
+  ps.setControlsAllowedLateral((bool)(health.controls_allowed_sp_pkt & 1U));
+  ps.setControlsAllowedLongitudinal((bool)((health.controls_allowed_sp_pkt >> 1) & 1U));
 }
 
 void fill_panda_can_state(cereal::PandaState::PandaCanState::Builder &cs, const can_health_t &can_health) {
@@ -187,6 +217,26 @@ std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroa
   }
 
   health_t health = *health_opt;
+
+  static int previous_safety_mode = -1;
+  static int previous_generic_allowed = -1;
+  static int previous_lateral_allowed = -1;
+  static int previous_longitudinal_allowed = -1;
+  const int lateral_allowed = health.controls_allowed_sp_pkt & 1U;
+  const int longitudinal_allowed = (health.controls_allowed_sp_pkt >> 1) & 1U;
+  if ((previous_safety_mode != health.safety_mode_pkt) ||
+      (previous_generic_allowed != health.controls_allowed_pkt) ||
+      (previous_lateral_allowed != lateral_allowed) ||
+      (previous_longitudinal_allowed != longitudinal_allowed)) {
+    mads_diag("panda safety=" + std::to_string(health.safety_mode_pkt) +
+              " generic_allowed=" + std::to_string(health.controls_allowed_pkt) +
+              " lateral_allowed=" + std::to_string(lateral_allowed) +
+              " longitudinal_allowed=" + std::to_string(longitudinal_allowed));
+    previous_safety_mode = health.safety_mode_pkt;
+    previous_generic_allowed = health.controls_allowed_pkt;
+    previous_lateral_allowed = lateral_allowed;
+    previous_longitudinal_allowed = longitudinal_allowed;
+  }
 
   std::array<can_health_t, PANDA_CAN_CNT> can_health{};
   for (uint32_t i = 0; i < PANDA_CAN_CNT; i++) {
@@ -249,11 +299,6 @@ std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroa
 }
 
 void send_peripheral_state(Panda *panda, PubMaster *pm) {
-  auto health_opt = panda->get_state();
-  if (!health_opt) {
-    return;
-  }
-
   // build msg
   MessageBuilder msg;
   auto evt = msg.initEvent();
@@ -262,9 +307,20 @@ void send_peripheral_state(Panda *panda, PubMaster *pm) {
   auto ps = evt.initPeripheralState();
   ps.setPandaType(panda->hw_type);
 
-  health_t health = *health_opt;
-  ps.setVoltage(health.voltage_pkt);
-  ps.setCurrent(health.current_pkt);
+  // A missing optional health reply must not suppress peripheralState itself.
+  // selfdrived treats this topic as a mandatory 2 Hz inter-process heartbeat;
+  // returning here therefore presents a healthy USB panda/CAN path as a
+  // communication failure and soft-disables control. This is seen with F4
+  // panda firmware that can serve the health request used by pandaStates but
+  // occasionally rejects a second request in the same 100 Hz loop.
+  if (auto health_opt = panda->get_state()) {
+    const health_t &health = *health_opt;
+    ps.setVoltage(health.voltage_pkt);
+    ps.setCurrent(health.current_pkt);
+  } else {
+    ps.setVoltage(0);
+    ps.setCurrent(0);
+  }
 
   uint16_t fan_speed_rpm = panda->get_fan_speed();
   ps.setFanSpeedRpm(fan_speed_rpm);

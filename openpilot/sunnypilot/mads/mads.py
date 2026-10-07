@@ -22,6 +22,15 @@ SafetyModel = structs.CarParams.SafetyModel
 
 SET_SPEED_BUTTONS = (ButtonType.accelCruise, ButtonType.resumeCruise, ButtonType.decelCruise, ButtonType.setCruise)
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+PandaType = log.PandaState.PandaType
+
+# xiaomi8: 这些 panda 的 health ABI 早于 SP 权限字节, pandad 只能用通用
+# controls_allowed 合成 controlsAllowedLateral, 该值不含独立横向信息.
+# 此时 MADS 纯横向(原厂 ACC 未激活)必然读到 lateral=False, 属误报, 必须跳过.
+PANDA_TYPES_WITHOUT_SP_BYTE = (
+  PandaType.whitePanda, PandaType.greyPanda, PandaType.blackPanda,
+  PandaType.uno, PandaType.dos,
+)
 
 
 class ModularAssistiveDrivingSystem:
@@ -113,8 +122,16 @@ class ModularAssistiveDrivingSystem:
     if not self.active or self.selfdrive.enabled:
       self.lateral_mismatch_counter = 0
     elif any(not ps.controlsAllowedLateral for ps in self.selfdrive.sm['pandaStates']
-             if ps.safetyModel not in IGNORED_SAFETY_MODES):
+             if ps.safetyModel not in IGNORED_SAFETY_MODES
+             and ps.pandaType not in PANDA_TYPES_WITHOUT_SP_BYTE):
       self.lateral_mismatch_counter += 1
+    else:
+      # A resolved Panda-state sample must break the mismatch window.  Without
+      # this reset, brief independent USB/CAN status blips accumulate across
+      # an entire drive and eventually produce a false immediate-disable in a
+      # later bend.  Sustained disagreement still reaches the 200-sample
+      # safety threshold unchanged.
+      self.lateral_mismatch_counter = 0
 
   def update_events(self, CS: structs.CarState):
     if not self.selfdrive.enabled and self.enabled:

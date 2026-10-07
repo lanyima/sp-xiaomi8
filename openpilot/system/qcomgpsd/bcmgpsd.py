@@ -63,6 +63,8 @@ def sudo_popen(cmd, **kwargs):
 
 def start_lhd():
   """Start the BCM4775 low-level host driver in chroot."""
+  if not os.path.isfile(f"{CHROOT}/vendor/bin/lhd"):
+    raise RuntimeError(f"BCM Android runtime is incomplete: {CHROOT}/vendor/bin/lhd missing")
   if is_process_running('vendor/bin/lhd'):
     print("lhd already running")
     return
@@ -82,9 +84,10 @@ def start_lhd():
   sudo_run(['mkdir', '-p', f"{CHROOT}/data/vendor/gps/log/lhd"], capture_output=True, timeout=3)
 
   # Mount sysfs if not already mounted (lhd needs nstandby path)
-  sudo_run(['mountpoint', '-q', f'{CHROOT}/sys'], capture_output=True)
-  sudo_run(['mount', '-t', 'sysfs', 'sysfs', f'{CHROOT}/sys'],
-           capture_output=True, timeout=5)
+  mounted = sudo_run(['mountpoint', '-q', f'{CHROOT}/sys'], capture_output=True).returncode == 0
+  if not mounted:
+    sudo_run(['mount', '-t', 'sysfs', 'sysfs', f'{CHROOT}/sys'],
+             capture_output=True, timeout=5)
 
   cmd = f'chroot {CHROOT} /system/bin/sh -c "{CHR_ENV} /vendor/bin/lhd {LHD_CONF}"'
   sudo_popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -97,6 +100,9 @@ def start_glgps():
   if is_process_running('vendor/bin/glgps'):
     print("glgps already running")
     return
+
+  if not os.path.isfile(f"{CHROOT}/vendor/bin/glgps"):
+    raise RuntimeError(f"BCM Android runtime is incomplete: {CHROOT}/vendor/bin/glgps missing")
 
   # Create required directories and pipes
   sudo_run(['mkdir', '-p', f"{CHROOT}/data/vendor/gps/log/gps"], capture_output=True, timeout=3)
@@ -326,7 +332,10 @@ def main():
     if not running[0]:
       return
     try:
-      pipe_fd = open(GPSPIPE, 'r')
+      # Opening a FIFO in blocking mode can hang the process manager forever
+      # if glgps has not opened its writer yet.  Nonblocking open lets the
+      # watchdog below restart either Android component when necessary.
+      pipe_fd = os.fdopen(os.open(GPSPIPE, os.O_RDONLY | os.O_NONBLOCK), 'r')
       print("bcmgpsd: NMEA pipe opened")
       break
     except (FileNotFoundError, OSError) as e:
@@ -368,7 +377,7 @@ def main():
         pipe_fd.close()
         time.sleep(1)
         try:
-          pipe_fd = open(GPSPIPE, 'r')
+          pipe_fd = os.fdopen(os.open(GPSPIPE, os.O_RDONLY | os.O_NONBLOCK), 'r')
         except OSError:
           time.sleep(2)
           continue

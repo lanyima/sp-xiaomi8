@@ -44,6 +44,11 @@ def sudo_write(val: str, path: str) -> None:
     except PermissionError:
       # fallback for debugfs files
       subprocess.run(f"sudo su -c 'echo {val} > {path}'", shell=True)
+  except OSError:
+    # xiaomi8: EINVAL 常见于给已下线的CPU policy sysfs节点写governor(SDM845上cpu4-7永久offline).
+    # chmod/sudo su重试对这种情况没有意义, 之前没捕获会直接把异常甩给调用方(比如hardware.py设置
+    # devfreq/cpufreq governor时), 让上层逻辑莫名其妙崩掉. 静默跳过, 2026-08-29 补.
+    pass
 
 
 def sudo_read(path: str) -> str:

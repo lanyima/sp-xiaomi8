@@ -48,7 +48,26 @@ class DeviceCameraConfig:
 
 _ar_ox_fisheye = CameraConfig(1928, 1208, 567.0)  # focal length probably wrong? magnification is not consistent across frame
 _os_fisheye = CameraConfig(2688 // 2, 1520 // 2, 567.0 / 4 * 3)
-_ar_ox_config = DeviceCameraConfig(CameraConfig(1928, 1208, 2648.0), _ar_ox_fisheye, _ar_ox_fisheye)
+
+
+def _xiaomi8_road_focal():
+  # xiaomi8: Mi8 IMX363 物理焦距 4.44mm, 像元 1.4µm, 2×2 binning:
+  # Verified V4L2 road value is 1585.7 px.  This is the optical-spec value
+  # and the value installed on the validated road device.
+  # comma3 的 2648 偏高 ~1.67x → modeld 误判道路几何 → 画龙 (lane weaving).
+  # 实测拟合 (RADAR_CAMERA_SUMMARY): 视觉=0.872×雷达+2.24m → 1400×1.147=1606px,
+  # 与规格书 1585.7 差 1.3%, 两法互证.
+  # 可路测微调: 写 /data/road_cam_focal.txt (无需重编), 改后重启 openpilot 生效.
+  try:
+    with open("/data/road_cam_focal.txt") as _fh:
+      return float(_fh.read().strip())
+  except Exception:
+    return 1585.7
+# The V4L2 IMX363 road stream is the complete 2x2-binned 2016x1512 array.
+# The pixel pitch is still 2.8um, so fx remains 1585.7px; only the principal
+# point changes to the actual 4:3 centre (1008, 756). Do not reuse a comma
+# camera's 1928x1208 geometry: its incorrect centre corrupts calibration/warp.
+_ar_ox_config = DeviceCameraConfig(CameraConfig(2016, 1512, _xiaomi8_road_focal()), _ar_ox_fisheye, _ar_ox_fisheye)
 _os_config = DeviceCameraConfig(CameraConfig(2688 // 2, 1520 // 2, 1522.0 * 3 / 4), _os_fisheye, _os_fisheye)
 _neo_config = DeviceCameraConfig(CameraConfig(1164, 874, 910.0), CameraConfig(816, 612, 650.0), _NoneCameraConfig())
 
@@ -63,6 +82,9 @@ DEVICE_CAMERAS: dict[tuple[str, str], DeviceCameraConfig] = {
   # before deviceState.deviceType was set, assume tici AR config
   ("unknown", "ar0231"): _ar_ox_config,
   ("unknown", "ox03c10"): _ar_ox_config,
+  # xiaomi8 兜底: 本机实测 deviceState.deviceType 报的是 "tici"(命中上面那条 tici/unknown),
+  # 这条只是防 deviceState 尚未收到时的空档, 与上面几条同配置, 不改变任何现有行为。
+  ("unknown", "unknown"): _ar_ox_config,
 
   # simulator (emulates a tici)
   ("pc", "unknown"): _ar_ox_config,

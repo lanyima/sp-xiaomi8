@@ -35,7 +35,18 @@ def drop_realtime() -> None:
 
 def set_core_affinity(cores: list[int]) -> None:
   if sys.platform == 'linux' and not PC:
-    os.sched_setaffinity(0, cores)
+    allowed = sorted(os.sched_getaffinity(0))
+    target = [x for x in cores if x in allowed]
+    if target:
+      os.sched_setaffinity(0, target)
+    elif os.getenv("XIAOMI8_KEEP_INHERITED_AFFINITY") == "1":
+      # SDM845/AGNOS can report only CPUs 0-3 through Python's affinity API
+      # while the inherited kernel mask is actually 0-7. Falling back to CPU3
+      # packs modeld, controlsd, and card onto one little core. Keep the
+      # inherited mask so the scheduler can use the Gold cores instead.
+      return
+    else:
+      os.sched_setaffinity(0, allowed[-len(cores):])
 
 
 def config_realtime_process(cores: int | list[int], priority: int) -> None:

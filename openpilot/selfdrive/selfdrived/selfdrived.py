@@ -100,6 +100,8 @@ class SelfdriveD(CruiseHelper):
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP']
+    if os.getenv("NO_DM") is not None:
+      ignore += ["driverMonitoringState"]  # xiaomi8: no front cam, dmonitoringd disabled -> never published
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -427,7 +429,7 @@ class SelfdriveD(CruiseHelper):
     if not self.CP.notCar:
       if not self.sm['livePose'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['livePose'].inputsOK:
+      if not self.sm['livePose'].inputsOK and os.getenv("NO_LOCATIOND_TEMP") is None:
         self.events.add(EventName.locationdTemporaryError)
       if not self.sm['liveParameters'].valid and cal_status == log.LiveCalibrationData.Status.calibrated and not TESTING_CLOSET and (not SIMULATION or REPLAY):
         self.events.add(EventName.paramsdTemporaryError)
@@ -533,13 +535,14 @@ class SelfdriveD(CruiseHelper):
     # we want to disengage openpilot. However the status from the panda goes through
     # another socket other than the CAN messages and one can arrive earlier than the other.
     # Therefore we allow a mismatch for two samples, then we trigger the disengagement.
-    if not self.enabled:
-      self.mismatch_counter = 0
-
-    # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-    if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
-           if ps.safetyModel not in IGNORED_SAFETY_MODES):
-      self.mismatch_counter += 1
+    # All pandas not in silent mode must have controlsAllowed when openpilot is
+    # enabled. This is a *consecutive* mismatch window: panda state travels on
+    # a different socket from CAN, so one stale sample is expected, but a
+    # recovered sample must end the window.  Accumulating independent one-frame
+    # drops across a drive turns a later bend into a false Controls Mismatch.
+    controls_mismatch = self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
+                                             if ps.safetyModel not in IGNORED_SAFETY_MODES)
+    self.mismatch_counter = self.mismatch_counter + 1 if controls_mismatch else 0
 
     return CS
 

@@ -7,6 +7,7 @@
 
 #include "common/clutil.h"
 #include "common/swaglog.h"
+#include "system/camerad/cameras/nv12_info.h"
 #include "system/camerad/cameras/spectra.h"
 #include "media/cam_req_mgr.h"
 
@@ -169,9 +170,17 @@ void CameraBuf::init(cl_device_id device_id, cl_context context, SpectraCamera *
     LOGD("allocated %d CL buffers", frame_buf_count);
   }
 
-  // the encoder HW tells us the size it wants after setting it up.
-  // TODO: VENUS_BUFFER_SIZE should give the size, but it's too small. dependent on encoder settings?
-  size_t nv12_size = (out_img_width <= 1344 ? 2900 : 2346)*cam->stride;
+  // Keep the advertised VisionIPC dimensions and backing allocation in lockstep.
+  // The old encoder-derived constants happened to cover 1928x1208, but allocate
+  // only 4,804,608 bytes for a 2016x1512 stream. modeld correctly computes the
+  // 2016x1512 Venus size (5,787,648 bytes), so the mismatch caused a delayed
+  // GPU/CPU out-of-bounds read and modeld SIGSEGV. Use the same Venus helper as
+  // SpectraCamera::camera_open() for every geometry.
+  const auto [nv12_stride, nv12_y_height, nv12_uv_height, nv12_size] =
+    get_nv12_info(out_img_width, out_img_height);
+  assert(nv12_stride == cam->stride);
+  assert(nv12_y_height == cam->y_height);
+  assert(nv12_uv_height == cam->uv_height);
 
   vipc_server->create_buffers_with_sizes(stream_type, VIPC_BUFFER_COUNT, out_img_width, out_img_height, nv12_size, cam->stride, cam->uv_offset);
   LOGD("created %d YUV vipc buffers with size %dx%d", VIPC_BUFFER_COUNT, cam->stride, cam->y_height);

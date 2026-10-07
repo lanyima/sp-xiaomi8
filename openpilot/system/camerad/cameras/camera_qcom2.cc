@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -22,6 +23,32 @@ ExitHandler do_exit;
 const bool env_debug_frames = getenv("DEBUG_FRAMES") != nullptr;
 const bool env_log_raw_frames = getenv("LOG_RAW_FRAMES") != nullptr;
 const bool env_ctrl_exp_from_params = getenv("CTRL_EXP_FROM_PARAMS") != nullptr;
+
+// The sensor applies an exposure command three frames later. A 50 ms AE time
+// constant over-corrects that delayed feedback and is visibly unstable when a
+// moving scene changes the metering area. Keep this configurable for tuning,
+// while using a response that settles smoothly over several camera frames.
+static float ae_response_seconds() {
+  constexpr float default_seconds = 0.20f;
+  const char *value = getenv("IMX363_AE_RESPONSE_SECONDS");
+  if (value == nullptr) return default_seconds;
+
+  char *end = nullptr;
+  const float parsed = std::strtof(value, &end);
+  return (end != value && *end == '\0' && std::isfinite(parsed) && parsed >= 0.05f && parsed <= 2.0f)
+    ? parsed : default_seconds;
+}
+
+static float ae_grey_deadband() {
+  constexpr float default_fraction = 0.035f;
+  const char *value = getenv("IMX363_AE_GREY_DEADBAND");
+  if (value == nullptr) return default_fraction;
+
+  char *end = nullptr;
+  const float parsed = std::strtof(value, &end);
+  return (end != value && *end == '\0' && std::isfinite(parsed) && parsed >= 0.005f && parsed <= 0.15f)
+    ? parsed : default_fraction;
+}
 
 
 class CameraState {
@@ -76,6 +103,23 @@ void CameraState::init(VisionIpcServer *v) {
 CameraState::~CameraState() {}
 
 void CameraState::set_exposure_rect() {
+  // CamX's default Bayer-histogram metering window covers 90% of the sensor
+  // image. The old comma-road reference rectangle only covers the centre
+  // 54% x 55% on Mi 8's 1920x1080 binned output; it therefore exposes for a
+  // bright centre while leaving the rest of a road scene visibly grey/dark.
+  // Use the factory-style broad window for this route. Keep the old rectangle
+  // available for a controlled A/B via IMX363_AE_CENTER_ROI=1.
+  if (camera.cc.camera_num == 0 && getenv("IMX363_AE_CENTER_ROI") == nullptr) {
+    const int output_width = static_cast<int>(camera.buf.out_img_width);
+    const int output_height = static_cast<int>(camera.buf.out_img_height);
+    const int margin_x = output_width / 20;
+    const int margin_y = output_height / 20;
+    ae_xywh = (Rect){margin_x, margin_y,
+                     output_width - 2 * margin_x,
+                     output_height - 2 * margin_y};
+    return;
+  }
+
   // set areas for each camera, shouldn't be changed
   std::vector<std::pair<Rect, float>> ae_targets = {
     // (Rect, F)
@@ -120,7 +164,7 @@ void CameraState::set_camera_exposure(float grey_frac) {
   const float dt = 0.05;
 
   const float ts_grey = 10.0;
-  const float ts_ev = 0.05;
+  const float ts_ev = ae_response_seconds();
 
   const float k_grey = (dt / ts_grey) / (1.0 + dt / ts_grey);
   const float k_ev = (dt / ts_ev) / (1.0 + dt / ts_ev);
@@ -138,7 +182,14 @@ void CameraState::set_camera_exposure(float grey_frac) {
   float new_target_grey = std::clamp(0.4 - 0.3 * log2(1.0 + sensor->target_grey_factor*cur_ev_) / log2(6000.0), target_grey_minimums[camera.cc.camera_num], 0.4);
   float target_grey = (1.0 - k_grey) * target_grey_fraction + k_grey * new_target_grey;
 
-  float desired_ev = std::clamp(cur_ev_ / sensor->ev_scale * target_grey / grey_frac, sensor->min_ev, sensor->max_ev);
+  // The IMX363's binned V4L2 path has delayed, quantized grey statistics. Around
+  // equilibrium it alternated between adjacent analog-gain bins every few frames,
+  // creating visible 10% brightness flicker. Do not chase measurement noise inside
+  // this bounded neutral zone; genuine lighting changes still pass through normally.
+  const float grey_error = target_grey - grey_frac;
+  float desired_ev = std::abs(grey_error) <= ae_grey_deadband()
+    ? cur_ev_ / sensor->ev_scale
+    : std::clamp(cur_ev_ / sensor->ev_scale * target_grey / grey_frac, sensor->min_ev, sensor->max_ev);
   float k = (1.0 - k_ev) / 3.0;
   desired_ev = (k * cur_ev[0]) + (k * cur_ev[1]) + (k * cur_ev[2]) + (k_ev * desired_ev);
 
@@ -167,7 +218,22 @@ void CameraState::set_camera_exposure(float grey_frac) {
     time_bytes = params.get("CameraDebugExpTime");
   }
 
-  if (gain_bytes.size() > 0 && time_bytes.size() > 0) {
+  int locked_gain = 0, locked_time = 0;
+  const char *locked = getenv("IMX363_AE_LOCK");
+  const bool lock_exposure = locked != nullptr &&
+    std::sscanf(locked, "%d,%d", &locked_gain, &locked_time) == 2 &&
+    locked_gain >= sensor->analog_gain_min_idx && locked_gain <= sensor->analog_gain_max_idx &&
+    locked_time >= sensor->exposure_time_min && locked_time <= sensor->exposure_time_max;
+
+  if (lock_exposure) {
+    // Diagnostic override for measuring pipeline stability independently of AE.
+    // It is deliberately opt-in and is never enabled in the shipped environment.
+    gain_idx = locked_gain;
+    exposure_time = locked_time;
+    new_exp_g = gain_idx;
+    new_exp_t = exposure_time;
+    enable_dc_gain = false;
+  } else if (gain_bytes.size() > 0 && time_bytes.size() > 0) {
     // Override gain and exposure time
     gain_idx = std::stoi(gain_bytes);
     exposure_time = std::stoi(time_bytes);
@@ -198,6 +264,42 @@ void CameraState::set_camera_exposure(float grey_frac) {
   target_grey_fraction = target_grey;
 
   analog_gain_frac = sensor->sensor_analog_gains[new_exp_g];
+  if (camera.sensor->abf34_noise_lut_profiles.size() >= 2) {
+    // Match the 1x, ~2x, ~4x and ~10x factory AEC regions. Hysteresis prevents a
+    // small AE fluctuation from changing the denoise curve every frame.
+    if (camera.ife_abf34_profile == 0 && analog_gain_frac >= 2.0f) {
+      camera.ife_abf34_profile = 1;
+    } else if (camera.ife_abf34_profile == 1) {
+      if (analog_gain_frac >= 4.0f && camera.sensor->abf34_noise_lut_profiles.size() >= 3) {
+        camera.ife_abf34_profile = 2;
+      } else if (analog_gain_frac <= 1.8f) {
+        camera.ife_abf34_profile = 0;
+      }
+    } else if (camera.ife_abf34_profile == 2) {
+      if (analog_gain_frac >= 8.0f && camera.sensor->abf34_noise_lut_profiles.size() >= 4) {
+        camera.ife_abf34_profile = 3;
+      } else if (analog_gain_frac <= 3.5f) {
+        camera.ife_abf34_profile = 1;
+      }
+    } else if (camera.ife_abf34_profile >= 3 && analog_gain_frac <= 6.5f) {
+      camera.ife_abf34_profile = 2;
+    }
+  }
+
+  // IQ policy: preserve the unfiltered 1x daylight image, but restore the
+  // Semco ABF34 profile as soon as real analogue gain is needed.  Diagnostic
+  // overrides stay explicit: DISABLE_IFE_ABF wins for old A/B scripts;
+  // IMX363_ABF_MODE=on/off forces either state, and the production default is
+  // auto. This is evaluated per request so crossing an AEC boundary does not
+  // require restarting camerad.
+  bool abf_enabled = analog_gain_frac >= 2.0f;
+  if (getenv("DISABLE_IFE_ABF") != nullptr) {
+    abf_enabled = false;
+  } else if (const char *mode = getenv("IMX363_ABF_MODE")) {
+    if (std::strcmp(mode, "on") == 0) abf_enabled = true;
+    if (std::strcmp(mode, "off") == 0) abf_enabled = false;
+  }
+  camera.ife_abf34_enabled = abf_enabled;
   gain_idx = new_exp_g;
   exposure_time = new_exp_t;
   dc_gain_enabled = enable_dc_gain;
