@@ -8,6 +8,8 @@ sensors = [
   'sensors/mmc5603nj_magn.cc',
 ]
 libs = [common, messaging, 'pthread']
-if arch == "larch64":
+# xiaomi8: 同上, 本移植下 arch 是 "comma_arm64"。不改则 -li2c 不链接 ->
+#   配合 --no-undefined, sensord 链接失败。
+if arch in ("comma_arm64", "larch64"):
   libs.append('i2c')
 env.Program('sensord', ['sensors_qcom2.cc'] + sensors, LIBS=libs)

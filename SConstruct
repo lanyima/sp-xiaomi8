@@ -197,7 +197,11 @@ if _extra_cc:
   env.Append(CCFLAGS=_extra_cc)
 
 # xiaomi8: clang-18 on AGNOS lacks arm_neon.h; disable Eigen vectorisation globally
-if arch == "larch64":
+# 注意: 本移植下 arch 是 "comma_arm64" (检测 /AGNOS), 不是 "larch64" (检测 /TICI)。
+#   上游把 TICI -> COMMA_HARDWARE 改名后, 这处守卫没跟着改 -> 永不命中 ->
+#   Eigen 打开 NEON 向量化 -> arm_neon.h 报 unknown type name '__Int8x8_t'
+#   -> car.os 编译失败 -> 车机停在 "openpilot failed to build".
+if arch in ("comma_arm64", "larch64"):
   env.Append(CPPDEFINES=["EIGEN_DONT_VECTORIZE"])
 
 # no --as-needed on mac linker
