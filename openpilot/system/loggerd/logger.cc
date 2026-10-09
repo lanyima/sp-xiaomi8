@@ -170,16 +170,41 @@ LoggerState::LoggerState(const std::string &log_root) {
 }
 
 LoggerState::~LoggerState() {
-  if (rlog) {
-    log_sentinel(this, SentinelType::END_OF_ROUTE, exit_signal);
+  close();
+}
+
+bool LoggerState::close() {
+  if (!rlog) return true;
+
+  log_sentinel(this, SentinelType::END_OF_ROUTE, exit_signal);
+  // qlog is small and is useful for postmortem diagnostics, but an rlog is
+  // considered complete only when both streams have their Zstd end frame.
+  // Do not remove rlog.lock before this point: it is the only durable signal
+  // that a segment is safe for replay.
+  const bool rlog_ok = rlog->close();
+  const bool qlog_ok = qlog->close();
+  rlog.reset();
+  qlog.reset();
+  if (rlog_ok && qlog_ok) {
     std::remove(lock_file.c_str());
+  } else {
+    LOGE("leaving %s in place: rlog=%d qlog=%d", lock_file.c_str(), rlog_ok, qlog_ok);
   }
+  return rlog_ok && qlog_ok;
 }
 
 bool LoggerState::next() {
   if (rlog) {
     log_sentinel(this, SentinelType::END_OF_SEGMENT);
-    std::remove(lock_file.c_str());
+    const bool rlog_ok = rlog->close();
+    const bool qlog_ok = qlog->close();
+    rlog.reset();
+    qlog.reset();
+    if (rlog_ok && qlog_ok) {
+      std::remove(lock_file.c_str());
+    } else {
+      LOGE("previous segment is incomplete: rlog=%d qlog=%d", rlog_ok, qlog_ok);
+    }
   }
 
   segment_path = route_path + "--" + std::to_string(++part);

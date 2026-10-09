@@ -290,13 +290,17 @@ if arch == "larch64" or arch == "aarch64":
   SConscript(['openpilot/system/camerad/SConscript'])
 
 # Build selfdrive
-SConscript([
-  'openpilot/selfdrive/pandad/SConscript',
-  'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
-  'openpilot/selfdrive/locationd/SConscript',
-  'openpilot/selfdrive/modeld/SConscript',
-  'openpilot/selfdrive/ui/SConscript',
-])
+SConscript(['openpilot/selfdrive/pandad/SConscript'])
+
+# Keep a narrow, opt-in build graph for field repair of pandad. A normal build
+# remains unchanged; PANDAD_ONLY_BUILD=1 avoids initializing modeld/tinygrad.
+if os.getenv("PANDAD_ONLY_BUILD") != "1":
+  SConscript([
+    'openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/SConscript',
+    'openpilot/selfdrive/locationd/SConscript',
+    'openpilot/selfdrive/modeld/SConscript',
+    'openpilot/selfdrive/ui/SConscript',
+  ])
 
 SConscript(['openpilot/sunnypilot/SConscript'])
 

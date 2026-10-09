@@ -4,6 +4,8 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import os
+
 import pyray as rl
 
 from openpilot.cereal import log
@@ -40,8 +42,13 @@ class CircularAlertsRenderer:
     if not ui_state.started:
       self._standstill_elapsed_time = 0.0
 
+    # Most devices wait for driverStateV2 before displaying these secondary
+    # alerts. Xiaomi 8 deliberately runs with NO_DM (no driver-facing camera),
+    # so that topic is never published and the standstill timer/green-light
+    # alert would otherwise be permanently invisible.
+    driver_state_ready = sm.recv_frame['driverStateV2'] > ui_state.started_frame
     self._allow_e2e_alerts = sm['selfdriveState'].alertSize == log.SelfdriveState.AlertSize.none and \
-                             sm.recv_frame['driverStateV2'] > ui_state.started_frame
+                             (driver_state_ready or os.getenv("NO_DM") is not None)
 
     if self._green_light_alert or self._lead_depart_alert:
       self._e2e_alert_display_timer = 3 * gui_app.target_fps

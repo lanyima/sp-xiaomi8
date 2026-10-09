@@ -5,6 +5,7 @@
 #include <cassert>
 #include <stdexcept>
 #include <vector>
+#include <algorithm>
 
 #include "openpilot/cereal/messaging/messaging.h"
 #include "common/swaglog.h"
@@ -12,9 +13,35 @@
 
 const bool PANDAD_MAXOUT = getenv("PANDAD_MAXOUT") != nullptr;
 
+// Black panda firmware deployed before the 2026-08 health ABI change returns
+// two trailing permission bytes. Current firmware packs them into one byte and
+// appends temperature. Keep the host compatible with both; otherwise an old
+// panda can be interpreted as reporting lateral permission false and MADS
+// immediately raises "Controls Mismatch: Lateral" on every platform.
+struct __attribute__((packed)) legacy_health_t {
+  uint32_t uptime_pkt, voltage_pkt, current_pkt, safety_tx_blocked_pkt, safety_rx_invalid_pkt;
+  uint32_t tx_buffer_overflow_pkt, rx_buffer_overflow_pkt, faults_pkt;
+  uint8_t ignition_line_pkt, ignition_can_pkt, controls_allowed_pkt, car_harness_status_pkt, safety_mode_pkt;
+  uint16_t safety_param_pkt;
+  uint8_t fault_status_pkt, power_save_enabled_pkt, heartbeat_lost_pkt;
+  uint16_t alternative_experience_pkt;
+  float interrupt_load_pkt;
+  uint8_t fan_power, safety_rx_checks_invalid_pkt;
+  uint16_t spi_error_count_pkt, sbu1_voltage_mV, sbu2_voltage_mV;
+  uint8_t som_reset_triggered;
+  uint16_t sound_output_level_pkt;
+  uint8_t controls_allowed_lateral_pkt, controls_allowed_longitudinal_pkt;
+};
+
 Panda::Panda(std::string serial) {
-  handle = std::make_unique<PandaSpiHandle>(serial);
-  LOGW("connected to %s over SPI", serial.c_str());
+  // xiaomi8 2026-08-20: 先试USB(外置黑panda), 失败退SPI(内置panda). 恢复自sp2025被砍的USB支持.
+  try {
+    handle = std::make_unique<PandaUsbHandle>(serial);
+    LOGW("connected to %s over USB", serial.c_str());
+  } catch (std::exception &e) {
+    handle = std::make_unique<PandaSpiHandle>(serial);
+    LOGW("connected to %s over SPI", serial.c_str());
+  }
 
   hw_type = get_hw_type();
   can_reset_communications();
@@ -33,7 +60,11 @@ std::string Panda::hw_serial() {
 }
 
 std::vector<std::string> Panda::list() {
-  return PandaSpiHandle::list();
+  std::vector<std::string> serials = PandaUsbHandle::list();
+  for (const auto &s : PandaSpiHandle::list()) {
+    if (std::find(serials.begin(), serials.end(), s) == serials.end()) serials.push_back(s);
+  }
+  return serials;
 }
 
 void Panda::set_safety_model(cereal::CarParams::SafetyModel safety_model, uint16_t safety_param) {
@@ -87,6 +118,23 @@ void Panda::set_ir_pwr(uint16_t ir_pwr) {
 std::optional<health_t> Panda::get_state() {
   health_t health {0};
   int err = handle->control_read(0xd2, 0, 0, (unsigned char*)&health, sizeof(health));
+  // F4/black Panda firmware predating the SP permission fields returns the
+  // original 58-byte health payload.  It has only controls_allowed_pkt, which
+  // applies to both axes.  The previous condition started at the 59-byte
+  // transitional ABI, so a valid 58-byte reply was zero-filled at
+  // controls_allowed_sp_pkt and always published as lateral=false.
+  //
+  // 58 bytes: original F4 ABI, one controls_allowed flag
+  // 59 bytes: transitional ABI, separate trailing lateral/longitudinal flags
+  // 64 bytes: current ABI, packed controls_allowed_sp_pkt + temperature
+  constexpr int F4_HEALTH_SIZE = 58;
+  if (err == F4_HEALTH_SIZE) {
+    health.controls_allowed_sp_pkt = health.controls_allowed_pkt ? 0x3U : 0x0U;
+  } else if (err >= (int)sizeof(legacy_health_t) && err < (int)sizeof(health_t)) {
+    const auto &legacy = reinterpret_cast<const legacy_health_t &>(health);
+    health.controls_allowed_sp_pkt = (legacy.controls_allowed_lateral_pkt ? 1U : 0U) |
+                                     (legacy.controls_allowed_longitudinal_pkt ? 2U : 0U);
+  }
   return err >= 0 ? std::make_optional(health) : std::nullopt;
 }
 

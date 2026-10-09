@@ -37,11 +37,13 @@ available = probe_devices()
 if 'CUDA' in available:
   tg_backend = 'CUDA'
   tg_flags = f'DEV={tg_backend}'
-elif False:  # xiaomi8: QCOM GPU compile crashes kernel, force CPU
+elif 'QCOM' in available:
+  # xiaomi8: use QCOM GPU backend (Adreno 630) to match modeld.py runtime.
+  # Compiled kernels target the QCOM device; fall back to CPU if unavailable.
   tg_backend = 'QCOM'
   tg_flags = f'DEV={tg_backend} IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
 else:
-  tg_backend = 'CPU'  # xiaomi8: slow but kernel-stable; CL/QCOM crash SDM845, CLANG unavailable
+  tg_backend = 'CPU'  # xiaomi8: slow but kernel-stable fallback
   tg_flags = f'DEV={tg_backend} THREADS=0'
 
 tg_devices = { # which device to put jit inputs to at runtime

@@ -17,7 +17,11 @@ MAX_ANGLE_OFFSET_DELTA = 20 * DT_MDL  # Max 20 deg/s
 ROLL_MAX_DELTA = np.radians(20.0) * DT_MDL  # 20deg in 1 second is well within curvature limits
 ROLL_MIN, ROLL_MAX = np.radians(-10), np.radians(10)
 ROLL_LOWERED_MAX = np.radians(8)
-ROLL_STD_MAX = np.radians(1.5)
+ROLL_STD_MAX = np.radians(2.5)  # 2026-08-28: 小米8这颗手机IMU离线重放实测,
+# 卡尔曼滤波器对roll的后验不确定度稳定收敛在1.45-1.6度左右(roll数值本身/roll_valid/
+# steerRatioValid/stiffnessFactorValid全程正常, 唯独这个跟原1.5度阈值贴脸站着),
+# 导致正常驾驶时paramsdTemporaryError反复误触发软退出("TAKE CONTROL IMMEDIATELY")。
+# 放宽到2.5度给这颗IMU的真实精度地板留余量, 不改滤波器本身的估计逻辑。
 LATERAL_ACC_SENSOR_THRESHOLD = 4.0
 OFFSET_MAX = 10.0
 OFFSET_LOWERED_MAX = 8.0
@@ -28,6 +32,11 @@ LOW_ACTIVE_SPEED = 10.0
 class VehicleParamsLearner:
   def __init__(self, CP: car.CarParams, steer_ratio: float, stiffness_factor: float, angle_offset: float, P_initial: np.ndarray | None = None):
     self.kf = CarKalman(GENERATED_DIR)
+    # Geely's yaw observation does not constrain this state reliably on the
+    # Xiaomi 8 sensor path. Keep geometry at the measured platform baseline;
+    # angle offset and road roll remain learned normally.
+    self.fixed_geometry = CP.brand == "geely"
+    self.platform_steer_ratio = CP.steerRatio
 
     self.x_initial = CarKalman.initial_x.copy()
     self.x_initial[States.STEER_RATIO] = steer_ratio
@@ -142,8 +151,17 @@ class VehicleParamsLearner:
 
     self.avg_angle_offset = np.clip(np.degrees(x[States.ANGLE_OFFSET].item()),
                                 self.avg_angle_offset - MAX_ANGLE_OFFSET_DELTA, self.avg_angle_offset + MAX_ANGLE_OFFSET_DELTA)
-    self.angle_offset = np.clip(np.degrees(x[States.ANGLE_OFFSET].item() + x[States.ANGLE_OFFSET_FAST].item()),
-                        self.angle_offset - MAX_ANGLE_OFFSET_DELTA, self.angle_offset + MAX_ANGLE_OFFSET_DELTA)
+    # The fast term is inferred from yaw residuals.  At parking/return-to-centre
+    # speeds that residual is poorly observable: a car can still be rotating after
+    # the steering wheel is back at zero.  Do not feed that transient into the
+    # controller or the safety gate below 10 m/s.  The learned, persistent offset
+    # remains active at every speed and is still checked for a real misalignment.
+    use_fast_angle_offset = self.active and self.observed_speed > LOW_ACTIVE_SPEED
+    target_angle_offset = np.degrees(x[States.ANGLE_OFFSET].item())
+    if use_fast_angle_offset:
+      target_angle_offset += np.degrees(x[States.ANGLE_OFFSET_FAST].item())
+    self.angle_offset = np.clip(target_angle_offset,
+                                self.angle_offset - MAX_ANGLE_OFFSET_DELTA, self.angle_offset + MAX_ANGLE_OFFSET_DELTA)
     self.roll = np.clip(float(x[States.ROAD_ROLL].item()), self.roll - ROLL_MAX_DELTA, self.roll + ROLL_MAX_DELTA)
     roll_std = float(P[States.ROAD_ROLL].item())
     if self.active and self.observed_speed > LOW_ACTIVE_SPEED:
@@ -153,7 +171,11 @@ class VehicleParamsLearner:
     else:
       sensors_valid = True
     self.avg_offset_valid = check_valid_with_hysteresis(self.avg_offset_valid, self.avg_angle_offset, OFFSET_MAX, OFFSET_LOWERED_MAX)
-    self.total_offset_valid = check_valid_with_hysteresis(self.total_offset_valid, self.angle_offset, OFFSET_MAX, OFFSET_LOWERED_MAX)
+    # Safety validity must follow the stable steering-sensor zero, not the
+    # short-lived yaw-residual term.  This keeps a genuine wheel alignment error
+    # protected while preventing a full-lock return at low speed from producing a
+    # false "Steering misalignment" no-entry event.
+    self.total_offset_valid = check_valid_with_hysteresis(self.total_offset_valid, self.avg_angle_offset, OFFSET_MAX, OFFSET_LOWERED_MAX)
     self.roll_valid = check_valid_with_hysteresis(self.roll_valid, self.roll, ROLL_MAX, ROLL_LOWERED_MAX)
 
     msg = messaging.new_message('liveParameters')
@@ -163,8 +185,14 @@ class VehicleParamsLearner:
     liveParameters = msg.liveParameters
     liveParameters.posenetValid = True
     liveParameters.sensorValid = sensors_valid
-    liveParameters.steerRatio = float(x[States.STEER_RATIO].item())
-    liveParameters.stiffnessFactor = float(x[States.STIFFNESS].item())
+    if self.fixed_geometry:
+      # Do not persist a yaw-observation artefact as vehicle geometry. A value
+      # around 24 for a 15-ratio Geely makes both directions cut into bends.
+      liveParameters.steerRatio = float(self.platform_steer_ratio)
+      liveParameters.stiffnessFactor = 1.0
+    else:
+      liveParameters.steerRatio = float(x[States.STEER_RATIO].item())
+      liveParameters.stiffnessFactor = float(x[States.STIFFNESS].item())
     liveParameters.roll = float(self.roll)
     liveParameters.angleOffsetAverageDeg = float(self.avg_angle_offset)
     liveParameters.angleOffsetDeg = float(self.angle_offset)

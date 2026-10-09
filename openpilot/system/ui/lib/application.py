@@ -860,11 +860,30 @@ class GuiApplication(GuiApplicationExt):
 
   @staticmethod
   def _default_width() -> int:
-    return 2160 if GuiApplication.big_ui() else 536
+    # xiaomi8: detect actual screen width from DRM modes (1080x2248 portrait → 2248x1080 landscape)
+    w, _ = GuiApplication._drm_size()
+    return w if w else (2160 if GuiApplication.big_ui() else 536)
 
   @staticmethod
   def _default_height() -> int:
-    return 1080 if GuiApplication.big_ui() else 240
+    _, h = GuiApplication._drm_size()
+    return h if h else (1080 if GuiApplication.big_ui() else 240)
+
+  @staticmethod
+  def _drm_size():
+    """Parse landscape WxH from first DRM-DSI connector mode (xiaomi8 screen adapter)."""
+    import glob
+    for p in glob.glob('/sys/class/drm/card0-DSI-*/modes'):
+      try:
+        with open(p) as f:
+          line = f.readline().strip()
+        w, h = line.split('x')[:2]
+        w, h = int(w), int(h)
+        if h > w: w, h = h, w
+        return w, h
+      except Exception:
+        continue
+    return None, None
 
   @staticmethod
   def big_ui() -> bool:

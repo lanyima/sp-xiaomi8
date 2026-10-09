@@ -45,7 +45,7 @@ struct can_frame {
 
 class Panda {
 private:
-  std::unique_ptr<PandaSpiHandle> handle;
+  std::unique_ptr<PandaCommsHandle> handle;  // xiaomi8: 基类, 可持USB或SPI
 
 public:
   Panda(std::string serial);

@@ -150,9 +150,13 @@ def start_hal3_direct():
     log(f"hal3_direct started (pid={hal3_pid})")
 
     # Wait for SHM to appear (up to 15s)
-    for _ in range(30):
+    # 2026-08-28: 启动过程中就周期性重绑IRQ(每4拍=2秒一次), 不是等成功了才调一次——
+    # 内核在hal3打开摄像头设备时会重置IRQ亲和性, 越早纠正回cpu6/cpu7, 越能减少
+    # hal3自己跟开机时一堆onroad进程(modeld/encoderd/loggerd/controlsd)抢cpu0的窗口。
+    for i in range(30):
         if os.path.exists(SHM_PATH):
             log("hal3_direct SHM ready")
+            set_irq_affinity()
             return True
         # Check if process died
         try:
@@ -161,10 +165,39 @@ def start_hal3_direct():
             log("hal3_direct died during startup!")
             hal3_pid = None
             return False
+        if i % 4 == 0:
+            set_irq_affinity()
         time.sleep(0.5)
 
     log("WARNING: SHM not ready after 15s")
     return True  # process may still be initializing
+
+
+def set_irq_affinity():
+    """xiaomi8: hal3_direct 启动后内核会重置摄像头IRQ亲和性, 全堆到cpu0(小核) ->
+    跟开机时一堆onroad进程同时冷启动抢CPU0, 拖慢hal3自己的SLPI/FastRPC握手。
+    重新绑定: 摄像头中断(cci/csid/ife等) -> cpu6(大核, camerad专用),
+              GPU中断(kgsl-3d0) -> cpu7(大核, modeld专用)。
+    (记录见 XIAOMI8_PORTING_GUIDE.md 第66.3节, 2026-08-28 补回这台设备缺失的这段)"""
+    IRQ_MAP = {
+        "cci": "6", "csid": "6", "ife": "6",
+        "csid-lite": "6", "ife-lite": "6",
+        "a5": "6", "cpas_camnoc": "6", "cpas-cdm": "6",
+        "kgsl-3d0": "7",
+    }
+    try:
+        with open("/proc/interrupts") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[-1] in IRQ_MAP:
+                    irq_num = parts[0].rstrip(":")
+                    cpu = IRQ_MAP[parts[-1]]
+                    subprocess.run(["sudo", "bash", "-c",
+                        f"echo {cpu} > /proc/irq/{irq_num}/smp_affinity_list"],
+                        timeout=5, capture_output=True)
+        log("IRQ affinity set (camera->cpu6, GPU->cpu7)")
+    except Exception as e:
+        log(f"set_irq_affinity failed: {e}")
 
 
 def is_hal3_running():
@@ -188,10 +221,8 @@ def ensure_all_running():
             run_cmd(f"sudo {cmd}")
             time.sleep(0.3)
 
-    # hal3_direct
-    if not is_hal3_running():
-        log("hal3_direct died, restarting...")
-        start_hal3_direct()
+    # hal3_direct: xiaomi8 — 绝不 restart。restart 会打坏 SLPI/vendor state (SEGV), 相机
+    # 反正也起不来。真死了只能等下次 reboot。这里只监控 binder 服务(上面)。
 
 
 def signal_handler(sig, frame):
@@ -200,24 +231,13 @@ def signal_handler(sig, frame):
 
 
 def cleanup():
-    """Kill hal3_direct on exit"""
-    global hal3_pid
-    if hal3_pid is not None:
-        log(f"stopping hal3_direct (pid={hal3_pid})")
-        try:
-            os.kill(hal3_pid, signal.SIGTERM)
-            time.sleep(1)
-            try:
-                os.kill(hal3_pid, signal.SIGKILL)
-            except OSError:
-                pass
-        except OSError:
-            pass
-        hal3_pid = None
+    # xiaomi8: do NOT kill hal3_direct on exit — it must survive across restarts.
+    # hal3 runs in this service's own systemd cgroup and is started at most once.
+    log("exit: leaving hal3_direct running (single-shot lifecycle)")
 
 
 def main():
-    global running
+    global running, hal3_pid
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -240,44 +260,29 @@ def main():
     # Step 3: Ensure HAL3 environment
     setup_hal3_env()
 
-    # Step 4: 检查是否已有预热的 hal3_direct (由 slpi-start.sh 预启动)
+    # Step 4/5: xiaomi8 — hal3_direct 最多起一次, 绝不 pkill+restart。
+    # 反复 kill/restart 会打坏 vendor lib / SLPI 内部 state (get_number_of_cameras SEGV) 并让
+    # 相机 SHM 桥停摆。本进程跑在独立 systemd cgroup (hal3-boot.service), comma 重启不会碰它 ——
+    # hal3 一直活着, camerad_hal_v2 继续读 SHM。改配置后不用再 reboot, restart comma 即可。
     if is_hal3_running():
-        log("hal3_direct already running (pre-warmed by slpi-start), waiting for SHM...")
-        shm_ready = False
-        for _ in range(30):  # 最多等 15 秒
+        log("hal3_direct already running, adopting (never restart)...")
+        try:
+            result = subprocess.run(["pgrep", "-f", "hal3_direct"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                hal3_pid = int(result.stdout.strip().split()[0])
+                log(f"adopted hal3_direct (pid={hal3_pid})")
+        except Exception as e:
+            log(f"adopt pid failed: {e}")
+        for _ in range(30):
             if os.path.exists(SHM_PATH):
-                shm_ready = True
-                break
-            # 检查进程是否还活着
-            if not is_hal3_running():
-                log("pre-warmed hal3_direct died while waiting for SHM")
+                log("hal3_direct SHM ready")
                 break
             time.sleep(0.5)
-
-        if shm_ready:
-            log("hal3_direct SHM ready (pre-warmed), adopting...")
-            try:
-                result = subprocess.run(["pgrep", "-f", "hal3_direct"],
-                                        capture_output=True, timeout=5)
-                if result.returncode == 0:
-                    hal3_pid = int(result.stdout.strip().split()[0])
-                    log(f"adopted pre-warmed hal3_direct (pid={hal3_pid})")
-            except Exception as e:
-                log(f"adopt pid failed: {e}")
-        else:
-            # 预热进程崩溃或超时, 重新启动
-            log("pre-warmed hal3_direct not ready, killing and restarting...")
-            run_cmd("sudo pkill -9 -f hal3_direct")
-            time.sleep(0.5)
-            # Step 5: Start hal3_direct
-            start_hal3_direct()
+        set_irq_affinity()
     else:
-        # 没有预热进程, 正常 kill + restart
-        run_cmd("sudo pkill -9 -f hal3_direct")
-        time.sleep(0.5)
-
-        # Step 5: Start hal3_direct
-        start_hal3_direct()
+        log("no hal3_direct running, starting once...")
+        if start_hal3_direct():
+            set_irq_affinity()
 
     log("=== Initial setup complete, entering monitor loop ===")
 
