@@ -3,7 +3,7 @@ import os
 os.environ['GMMU'] = '0' # for usbgpu fast loading, noop for qcom
 # xiaomi8: force QCOM GPU backend on TICI (Adreno 630); must be set before tinygrad import.
 # Experimental — validate on device; flip to CPU if the QCOM backend is unstable with the compiled model.
-from openpilot.system.hardware import TICI
+from openpilot.common.hardware import TICI
 if "DEV" not in os.environ:
   os.environ["DEV"] = "QCOM" if TICI else "CPU"
 from tinygrad.tensor import Tensor
@@ -34,6 +34,10 @@ from openpilot.selfdrive.modeld.usbgpu_link import wait_usbgpu_link
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+# jetlink: the large model on an attached host (a phone, a Jetson, a Mac),
+# joined over USB or Wi-Fi. The module answers as "off" when jetlink is not
+# present on the device, so this import is always safe.
+from openpilot.sunnypilot import jetlink_adapter
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -154,6 +158,11 @@ def main(demo=False):
   params.put_bool("UsbGpuPresent", _present)
   params.put_bool("UsbGpuCompiled", _compiled)
 
+  # jetlink, before config_realtime_process: will the link join this modeld?
+  # The accelerator's GPU has to come up now, on this thread, or its threads
+  # inherit the frame loop's realtime priority and core.
+  jetlink_joining = jetlink_adapter.prepare()
+
   config_realtime_process(7, 54)
 
   # visionipc clients
@@ -185,6 +194,14 @@ def main(demo=False):
   cloudlog.warning("loading model")
   model = ModelState(vipc_client_main.width, vipc_client_main.height, USBGPU)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
+
+  # jetlink: when the link joins, `small` above drives until it has, and the
+  # joined model is the one the loop runs. None unless prepare() said yes.
+  if jetlink_joining:
+    joining = jetlink_adapter.attach(model, vipc_client_main.width, vipc_client_main.height)
+    if joining is not None:
+      model = joining
+      cloudlog.warning("jetlink: running with the link's model")
 
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"])
@@ -285,11 +302,26 @@ def main(demo=False):
 
     frame_drop_ratio = frames_dropped / (1 + frames_dropped)
 
+    # jetlink: the link's model swaps in only while nothing is in control, and
+    # hands back to `small` once frames are dropping. Both are written onto the
+    # model before every frame, as modeld's own loop reads them.
+    model.in_control = jetlink_adapter.in_control(sm)
+    model.frame_drop_ratio = frame_drop_ratio
+
     bufs = {name: buf_extra if 'big' in name else buf_main for name in model.vision_input_names}
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.vision_input_names}
     frame_delay = DT_MDL # compensate for time passed since the frame was captured: current_time - timestamp_eof is 50ms on average
     action_delay = DT_MDL / 2 # middle of the interval between model output (current state) and next frame (expected state)
-    lat_action_t = lat_delay + frame_delay + action_delay
+
+    # Keep lateral action timing compatible with the SP2025 modeld path.
+    # lagd's Mi 8 fallback is 0.400 s while it is unestimated.  Adding the
+    # camera/frame (75 ms) prediction here made modeld request curvature at
+    # 0.475 s, while the legacy path requested it at the calibrated 0.400 s.
+    # In a bend that is a systematic 10-20% over-request and causes inward
+    # lane cutting independent of vehicle interface or camera resolution.
+    # Do not apply this to longitudinal planning: it has a distinct actuator
+    # timing model and remains compensated by capture and action timing.
+    lat_action_t = lat_delay
     long_action_t = long_delay + frame_delay + action_delay
     inputs: dict[str, np.ndarray] = {
       'desire_pulse': vec_desire,

@@ -27,6 +27,21 @@ from openpilot.system.ui.sunnypilot.widgets.list_view import ListItemSP, toggle_
 from openpilot.system.ui.sunnypilot.widgets.progress_bar import progress_item
 from openpilot.system.ui.sunnypilot.widgets.tree_dialog import TreeOptionDialog, TreeNode, TreeFolder
 
+# jetlink: the large driving model on an attached host (a phone, a Jetson, a
+# Mac). The index stored in JetlinkLink is jetlink.openpilot.MODES; the label
+# callback below words it, so this page never has to import the package.
+JETLINK_MODES = ("Off", "USB", "iOS", "Wi-Fi")
+
+
+def _jetlink_present() -> bool:
+  """Is the jetlink package on this device? Hides the setting where it is not,
+  rather than offering a pick that would do nothing."""
+  try:
+    import jetlink
+    return getattr(jetlink, "__file__", None) is not None
+  except Exception:
+    return False
+
 if gui_app.sunnypilot_ui():
   from openpilot.system.ui.sunnypilot.widgets.list_view import button_item_sp as button_item
 
@@ -98,9 +113,16 @@ class ModelsLayout(Widget):
                                         1, None, True, "", style.BUTTON_ACTION_WIDTH, None, True,
                                         lambda v: f"{v / 100:.2f} m")
 
+    self.jetlink_control = option_item_sp(tr("Jetlink (Big Model Host)"), "JetlinkLink", 0, len(JETLINK_MODES) - 1,
+                                          tr("Run the large driving model on an attached host instead of on the device. " +
+                                             "USB and iOS use the cable; Wi-Fi joins the host's hotspot and dials it."),
+                                          1, None, _jetlink_present, "", style.BUTTON_ACTION_WIDTH, None, False,
+                                          lambda v: JETLINK_MODES[v] if 0 <= v < len(JETLINK_MODES) else JETLINK_MODES[0])
+
     self.items = [self.current_model_item, self.cancel_download_item, self.supercombo_label, self.vision_label,
                   self.policy_label, self.off_policy_label, self.on_policy_label, self.refresh_item, self.clear_cache_item,
-                  self.lane_turn_desire_toggle, self.lane_turn_value_control, self.lagd_toggle, self.delay_control, self.camera_offset]
+                  self.lane_turn_desire_toggle, self.lane_turn_value_control, self.lagd_toggle, self.delay_control, self.camera_offset,
+                  self.jetlink_control]
 
   def _update_lagd_description(self, lagd_toggle: bool):
     desc = tr("Enable this for the car to learn and adapt its steering response time. Disable to use a fixed steering response time. " +

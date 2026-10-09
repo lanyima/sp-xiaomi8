@@ -136,6 +136,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Version", {PERSISTENT, STRING}},
 
     // --- sunnypilot params --- //
+
+    // Accelerator: what runs the large driving model. jetlink (a phone, a
+    // Jetson, a Mac over USB or Wi-Fi) reports its progress here for the UI.
+    {"AcceleratorProgress", {CLEAR_ON_MANAGER_START, JSON}},
+
     {"ApiCache_DriveStats", {PERSISTENT, JSON}},
     {"AutoLaneChangeBsmDelay", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"AutoLaneChangeTimer", {PERSISTENT | BACKUP, INT, "0"}},
@@ -158,6 +163,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EnableCopyparty", {PERSISTENT | BACKUP, BOOL}},
     {"EnableGithubRunner", {PERSISTENT | BACKUP, BOOL}},
     {"GreenLightAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // Geely ARS410 may provide a conservatively filtered lead when vision has
+    // no confident lead. This is deliberately opt-in and Geely-only.
+    {"GeelyRadarOnlyFallback", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"GithubRunnerSufficientVoltage", {CLEAR_ON_MANAGER_START , BOOL}},
     {"HasAcceptedTermsSP", {PERSISTENT, STRING, "0"}},
     {"HideVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -165,6 +173,16 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"InteractivityTimeout", {PERSISTENT | BACKUP, INT, "0"}},
     {"IsDevelopmentBranch", {CLEAR_ON_MANAGER_START, BOOL}},
     {"IsReleaseSpBranch", {CLEAR_ON_MANAGER_START, BOOL}},
+    // jetlink: the large model on an attached host. JetlinkLink is an index
+    // into jetlink.openpilot.MODES ('off', 'usb', 'ios', 'wifi'). JetlinkSpec
+    // carries whether the host has built the engine, which must survive a
+    // reboot, or every ignition cycle would rebuild a multi-minute engine.
+    // JetlinkChargePhone: an iPhone on a direct cable charges from the comma;
+    // off by default, since some lose the link once the comma powers them.
+    {"JetlinkChargePhone", {PERSISTENT, BOOL, "0"}},
+    {"JetlinkLink", {PERSISTENT | BACKUP, INT, "0"}},
+    {"JetlinkModelPointers", {PERSISTENT, JSON}},
+    {"JetlinkSpec", {PERSISTENT, JSON}},
     {"LastGPSPositionLLK", {PERSISTENT, STRING}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
@@ -200,6 +218,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ModelManager_Favs", {PERSISTENT | BACKUP, STRING}},
     {"ModelManager_LastSyncTime", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, INT, "0"}},
     {"ModelManager_ModelsCache", {PERSISTENT | BACKUP, JSON}},
+    // jetlink's big-model slot and catalog: the same files the manager keeps
+    // for a chestnut, so a picked big model survives a link mode change
+    {"ModelManager_ActiveBundleChestnut", {PERSISTENT, JSON}},
+    {"ModelManager_ModelsCache_Chestnut", {PERSISTENT | BACKUP, JSON}},
 
     // Neural Network Lateral Control
     {"NeuralNetworkLateralControl", {PERSISTENT | BACKUP, BOOL, "0"}},
