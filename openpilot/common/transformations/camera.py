@@ -52,8 +52,8 @@ _os_fisheye = CameraConfig(2688 // 2, 1520 // 2, 567.0 / 4 * 3)
 
 def _xiaomi8_road_focal():
   # xiaomi8: Mi8 IMX363 物理焦距 4.44mm, 像元 1.4µm, 2×2 binning:
-  # Verified V4L2 road value is 1585.7 px.  This is the optical-spec value
-  # and the value installed on the validated road device.
+  # HAL road calibration is 1587.5 px. Keep V4L2 on the same calibrated
+  # intrinsic value; the optical-spec estimate (1585.7) is only 0.11% lower.
   # comma3 的 2648 偏高 ~1.67x → modeld 误判道路几何 → 画龙 (lane weaving).
   # 实测拟合 (RADAR_CAMERA_SUMMARY): 视觉=0.872×雷达+2.24m → 1400×1.147=1606px,
   # 与规格书 1585.7 差 1.3%, 两法互证.
@@ -62,9 +62,9 @@ def _xiaomi8_road_focal():
     with open("/data/road_cam_focal.txt") as _fh:
       return float(_fh.read().strip())
   except Exception:
-    return 1585.7
+    return 1587.5
 # The V4L2 IMX363 road stream is the complete 2x2-binned 2016x1512 array.
-# The pixel pitch is still 2.8um, so fx remains 1585.7px; only the principal
+# The pixel pitch is still 2.8um, so fx remains 1587.5px; only the principal
 # point changes to the actual 4:3 centre (1008, 756). Do not reuse a comma
 # camera's 1928x1208 geometry: its incorrect centre corrupts calibration/warp.
 _ar_ox_config = DeviceCameraConfig(CameraConfig(2016, 1512, _xiaomi8_road_focal()), _ar_ox_fisheye, _ar_ox_fisheye)

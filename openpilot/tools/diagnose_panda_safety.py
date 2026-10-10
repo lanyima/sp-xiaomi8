@@ -22,7 +22,9 @@ def expected_config():
     return {"carParams": "missing"}
   with car.CarParams.from_bytes(raw) as cp:
     return {
-      "carName": cp.carName,
+      # Newer CarParams schemas no longer expose carName.  Keep the recorder
+      # usable across both package generations without changing vehicle state.
+      "car": getattr(cp, "carName", getattr(cp, "carFingerprint", "unknown")),
       "alternativeExperience": int(cp.alternativeExperience),
       "safetyConfigs": [{"model": int(s.safetyModel.raw), "param": int(s.safetyParam)} for s in cp.safetyConfigs],
     }

@@ -1,0 +1,11 @@
+{
+  "channel": "xiaomi8-port-latest",
+  "openpilot": {
+    "version": "0.11.2",
+    "release_notes": "xiaomi8 (dipper) latest port on AGNOS 19.5, Geely Binyue support",
+    "git_commit": "f079cd9812f8db19e98d1b8f5624b20e870b025e",
+    "git_origin": "https://github.com/sunnypilot/sunnypilot.git",
+    "git_commit_date": "2026-08-11T11:56:51+08:00",
+    "build_style": "release"
+  }
+}

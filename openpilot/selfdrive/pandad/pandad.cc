@@ -21,6 +21,7 @@
 #define MAX_IR_PANDA_VAL 50
 #define CUTOFF_IL 400
 #define SATURATE_IL 1000
+#define ALT_EXP_MADS_DISENGAGE_LATERAL_ON_BRAKE 2048
 
 ExitHandler do_exit;
 
@@ -44,21 +45,28 @@ bool check_connected(Panda *panda) {
 }
 
 bool process_mads_heartbeat(SubMaster *sm) {
+  const int alt_exp = (*sm)["carParams"].getCarParams().getAlternativeExperience();
+  const bool disengage_lateral_on_brake = (alt_exp & ALT_EXP_MADS_DISENGAGE_LATERAL_ON_BRAKE) != 0;
+
   const auto &mads = (*sm)["selfdriveStateSP"].getSelfdriveStateSP().getMads();
   const bool state_valid = sm->allAliveAndValid({"selfdriveStateSP"});
-  const bool mads_enabled = mads.getEnabled();
-  const bool heartbeat_mads = state_valid && mads_enabled;
+  // Keep the SP2025 protocol contract: when lateral is configured to drop on
+  // brake, Panda must receive the active state; the enabled state is only
+  // correct for the other MADS steering modes.
+  const bool heartbeat_type = disengage_lateral_on_brake ? mads.getActive() : mads.getEnabled();
+  const bool heartbeat_mads = state_valid && heartbeat_type;
 
   static int previous_valid = -1;
   static int previous_enabled = -1;
   static int previous_heartbeat = -1;
-  if ((previous_valid != state_valid) || (previous_enabled != mads_enabled) ||
+  if ((previous_valid != state_valid) || (previous_enabled != heartbeat_type) ||
       (previous_heartbeat != heartbeat_mads)) {
     mads_diag("heartbeat state_valid=" + std::to_string(state_valid) +
-              " mads_enabled=" + std::to_string(mads_enabled) +
+              " lateral_on_brake=" + std::to_string(disengage_lateral_on_brake) +
+              " heartbeat_type=" + std::to_string(heartbeat_type) +
               " sent=" + std::to_string(heartbeat_mads));
     previous_valid = state_valid;
-    previous_enabled = mads_enabled;
+    previous_enabled = heartbeat_type;
     previous_heartbeat = heartbeat_mads;
   }
   return heartbeat_mads;
@@ -436,7 +444,7 @@ void pandad_run(Panda *panda) {
   std::thread send_thread(can_send_thread, panda, fake_send);
 
   RateKeeper rk("pandad", 100);
-  SubMaster sm({"selfdriveState", "deviceState", "selfdriveStateSP"});
+  SubMaster sm({"selfdriveState", "deviceState", "selfdriveStateSP", "carParams"});
   PubMaster pm({"can", "pandaStates", "peripheralState"});
   PandaSafety panda_safety(panda);
   bool engaged = false;

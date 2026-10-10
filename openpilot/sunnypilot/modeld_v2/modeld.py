@@ -48,6 +48,9 @@ from openpilot.sunnypilot.modeld_v2.compile_modeld import derive_frame_skip, mak
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+# jetlink: the large model on an attached host, joined over USB or Wi-Fi. The
+# module answers as "off" when jetlink is not present on the device.
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
@@ -304,6 +307,12 @@ def main(demo=False):
   sentry.set_tag("daemon", PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
+
+  # jetlink, before config_realtime_process: will the link join this modeld?
+  # The accelerator's GPU has to come up now, on this thread, or its threads
+  # inherit the frame loop's realtime priority and core.
+  jetlink_joining = jetlink_adapter.prepare()
+
   config_realtime_process(7, 54)
 
   # visionipc clients
@@ -332,6 +341,14 @@ def main(demo=False):
   cloudlog.warning("loading model")
   model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height)
   cloudlog.warning("models loaded, modeld starting")
+
+  # jetlink: when the link joins, `small` above drives until it has, and the
+  # joined model is the one the loop runs. None unless prepare() said yes.
+  if jetlink_joining:
+    joining = jetlink_adapter.attach(model, vipc_client_main.width, vipc_client_main.height)
+    if joining is not None:
+      model = joining
+      cloudlog.warning("jetlink: running with the link's model")
 
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"])
@@ -438,6 +455,12 @@ def main(demo=False):
     prepare_only = vipc_dropped_frames > 0
     if prepare_only:
       cloudlog.error(f"skipping model eval. Dropped {vipc_dropped_frames} frames")
+
+    # jetlink: the link's model swaps in only while nothing is in control, and
+    # hands back to `small` once frames are dropping. Written onto the model
+    # before every frame, as this loop reads them.
+    model.in_control = jetlink_adapter.in_control(sm)
+    model.frame_drop_ratio = frame_drop_ratio
 
     bufs = {name: buf_extra if 'big' in name else buf_main for name in model.vision_input_names}
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.vision_input_names}

@@ -13,6 +13,9 @@ from openpilot.sunnypilot.mapd.mapd_manager import MAPD_PATH
 
 from openpilot.sunnypilot.models.helpers import get_active_model_runner
 from openpilot.sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
+# jetlink: the process list carries jetlinkd, whose should_run() this module
+# owns; the adapter answers as "off" when jetlink is not on the device.
+from openpilot.sunnypilot import jetlink_adapter
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 # xiaomi8: ign 门控防复位循环 — panda 接电即 ign=True → 强进 onroad → SDM845
@@ -141,16 +144,9 @@ procs = [
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(and_(livestream, not_(iscar)), notcar), enabled=False),  # xiaomi8: VIDC crash / CPU save
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run, enabled=False),  # xiaomi8: CPU save
 
-  # xiaomi8: V4L2/CSL camera pipeline (direct Spectra ISP). 2026-08-31 switched from HAL3.
-  # IMX363_BINNED=1 (launch_env.sh) runs the sensor in 2x2 binning; camerad_v4l2 talks
-  # to the kernel CSL driver directly (no hal3_direct/SHM bridge, no android_hal_manager).
-  # CSL retains exclusive camera state; retry after a transient startup race rather than
-  # leaving `camerad` permanently dead until the next full manager restart.
-  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad_v4l2"], always_run, enabled=not WEBCAM, restart_if_crash=True),
-  # V4L2 has no raw CamX AWB statistics. The old NV12-feedback helper formed a
-  # post-CCM closed loop and pulled calibrated whites cyan; use calibrated IFE
-  # gains by default. camera_awbd.py remains available for explicit diagnosis.
-  PythonProcess("camera_awbd", "openpilot.system.camerad.camera_awbd", always_run, enabled=False, restart_if_crash=True),
+  # xiaomi8: HAL3 camera pipeline (replaces qcom2/spectra). hal3_direct -> SHM -> camerad_hal_v2
+  PythonProcess("android_hal_manager", "openpilot.system.camerad.android_hal_manager", always_run),
+  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad_hal_v2"], always_run, enabled=not WEBCAM),  # xiaomi8: camera disabled temporarily
   PythonProcess("webcamerad", "openpilot.system.camerad.webcam.camerad", driverview, enabled=WEBCAM),
   PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=False),  # xiaomi8: thermal save
   PythonProcess("journald", "openpilot.system.journald", only_onroad, enabled=False),  # xiaomi8: CPU save
@@ -159,6 +155,11 @@ procs = [
 
   PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),  # xiaomi8: re-enabled
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=False),  # xiaomi8: no front camera
+
+  # jetlink: the resident owner of the USB gadget, for the cable modes. Wi-Fi
+  # dials the hotspot's gateway and holds nothing, so should_run() keeps this
+  # off there.
+  PythonProcess("jetlinkd", "openpilot.sunnypilot.jetlink_adapter", jetlink_adapter.should_run),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", always_run, enabled=False),  # xiaomi8 2026-08-19: 原生sensord需comma3的LSM6DS3(小米8没有)→exitCode=1崩→selfdrived报processNotRunning挡engage; IMU改由 sensord-imu.service(QMI SLPI ICM-20690)提供,故禁用  # xiaomi8: QMI SLPI driver, run always
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),

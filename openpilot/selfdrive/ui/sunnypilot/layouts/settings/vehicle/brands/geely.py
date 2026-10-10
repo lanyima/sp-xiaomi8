@@ -21,6 +21,3 @@ class GeelySettings(BrandSettings):
       param="GeelyRadarOnlyFallback",
     )
     self.items = [self.radar_only_fallback]
-
-  def update_settings(self):
-    pass

@@ -190,6 +190,14 @@ def hardware_thread(end_event, hw_queue) -> None:
   engaged_prev = False
   offroad_cycle_count = 0
 
+  # C3 direct wiring has neither the comma harness SBU ignition signal nor a
+  # car-specific ignition-CAN hook.  Keep this strictly scoped to the black
+  # Panda in that wiring mode: vehicle voltage must be present and at least
+  # one CAN controller must continue receiving frames.  The short hold avoids
+  # an offroad edge during a single quiet 10 Hz health sample.
+  c3_rx_count_prev = 0
+  c3_can_activity_ticks = 0
+
   params = Params()
   power_monitor = PowerMonitoring()
 
@@ -217,8 +225,25 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
 
-      # Set ignition based on any panda connected
-      onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+      # Set ignition based on any panda connected.
+      reported_ignition = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+
+      c3_direct = next((ps for ps in pandaStates if
+                        ps.pandaType == log.PandaState.PandaType.blackPanda and
+                        ps.harnessStatus == log.PandaState.HarnessStatus.notConnected and
+                        ps.voltage >= 9000), None)
+      if c3_direct is not None:
+        c3_rx_count = c3_direct.canState0.totalRxCnt + c3_direct.canState1.totalRxCnt + c3_direct.canState2.totalRxCnt
+        if c3_rx_count > c3_rx_count_prev:
+          c3_can_activity_ticks = 20  # two seconds at pandaStates' 10 Hz
+        elif c3_can_activity_ticks > 0:
+          c3_can_activity_ticks -= 1
+        c3_rx_count_prev = c3_rx_count
+      else:
+        c3_rx_count_prev = 0
+        c3_can_activity_ticks = 0
+
+      onroad_conditions["ignition"] = reported_ignition or c3_can_activity_ticks > 0
 
       pandaState = pandaStates[0]
 

@@ -139,7 +139,10 @@ class ModelCache:
 
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
-  MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v18.json"
+  # github.com/<owner>/<repo>/raw/<branch>/<path> is the short form of the
+  # raw.githubusercontent.com/<owner>/<repo>/refs/heads/<branch>/<path> URL;
+  # GitHub 302-redirects the former to the latter, so this saves ~22 chars.
+  MODEL_URL = "https://github.com/sunnypilot/sunnypilot-models/raw/gh-pages/docs/driving_models_v18.json"
 
   def __init__(self, params: Params):
     self.params = params
