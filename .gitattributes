@@ -12,3 +12,11 @@
 
 openpilot/selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
 openpilot/common/hardware/tici/updater filter=lfs diff=lfs merge=lfs -text
+
+# The UI crashes if it cannot load a font, and .lfsconfig points at the
+# upstream sunnypilot GitLab LFS endpoint that this fork cannot push to, so
+# these three are stored as real blobs instead of LFS pointers. Later rules
+# win, so this overrides the *.ttf / *.png patterns above.
+openpilot/selfdrive/assets/fonts/NotoColorEmoji.ttf -filter -diff -merge -text
+openpilot/selfdrive/assets/fonts/NotoSansSC-Bold.fnt -filter -diff -merge -text
+openpilot/selfdrive/assets/fonts/NotoSansSC-Bold.png -filter -diff -merge -text
